@@ -113,8 +113,11 @@ ALIAS_SUDO_TO_EMPTY_FOR_ROOT_CMD = (
     '{ [ "$(whoami)" == "root" ] && function sudo() { "$@"; } || true; }')
 
 
-def _proxyjump_to_proxycommand(proxy_jump: str,
-                               ssh_log_file: Optional[str] = None) -> str:
+def _proxyjump_to_proxycommand(
+        proxy_jump: str,
+        ssh_log_file: Optional[str] = None,
+        ssh_private_key: Optional[str] = None,
+        ssh_certificate_file: Optional[str] = None) -> str:
     """Convert ProxyJump spec to an equivalent implicit ProxyCommand.
 
     This mirrors OpenSSH's behavior when converting ProxyJump to ProxyCommand:
@@ -187,6 +190,10 @@ def _proxyjump_to_proxycommand(proxy_jump: str,
         cmd += ['-l', user]
     if port is not None:
         cmd += ['-p', str(port)]
+    if ssh_private_key is not None:
+        cmd += ['-i', ssh_private_key]
+    if ssh_certificate_file is not None:
+        cmd += ['-o', f'CertificateFile={ssh_certificate_file}']
     # Redirect stderr to /dev/null to avoid hanging.
     # The ProxyCommand inherits the parent ssh's stderr pipe.
     # Without this, the tunnel might hold the pipe open, causing
@@ -305,7 +312,7 @@ def ssh_options_list(
         # we could only log it to stderr (with -v), which can be noisy.
         # See: https://github.com/openssh/openssh-portable/blob/a6f8f793d427a831be1b350741faa4f34066d55f/ssh.c#L1355-L1382 # pylint: disable=line-too-long
         derived_proxy_command = _proxyjump_to_proxycommand(
-            ssh_proxy_jump, ssh_log_file)
+            ssh_proxy_jump, ssh_log_file, ssh_private_key, ssh_certificate_file)
         logger.debug(f'--- ProxyJump: {ssh_proxy_jump} -> '
                      f'ProxyCommand: {derived_proxy_command} ---')
         arg_dict.update({
