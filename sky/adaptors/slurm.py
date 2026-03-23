@@ -367,8 +367,7 @@ class SlurmClient:
 
         results: List[JobInfo] = []
         for line in stdout.splitlines():
-            # Split on \x1f before stripping, since strip() removes \x1f.
-            parts = line.split('\x1f')
+            parts = line.split(SEP)
             if len(parts) != 4:
                 if line.strip():
                     logger.debug(f'Unexpected squeue output line: {line!r}')

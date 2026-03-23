@@ -358,9 +358,9 @@ class TestQueryJobs:
             ssh_key=None,
         )
 
-        mock_output = ('100\x1fRUNNING\x1fNone\x1fnode[01-02]\n'
-                       '101\x1fPENDING\x1fResources\x1f\n'
-                       '102\x1fFAILED\x1fNonZeroExitCode\x1f\n')
+        mock_output = ('100\\x1fRUNNING\\x1fNone\\x1fnode[01-02]\n'
+                       '101\\x1fPENDING\\x1fResources\\x1f\n'
+                       '102\\x1fFAILED\\x1fNonZeroExitCode\\x1f\n')
 
         with mock.patch.object(client._runner, 'run') as mock_run:
             mock_run.return_value = (0, mock_output, '')
@@ -419,7 +419,8 @@ class TestQueryJobs:
         )
 
         with mock.patch.object(client._runner, 'run') as mock_run:
-            mock_run.return_value = (0, '100\x1fRUNNING\x1fNone\x1fnode1', '')
+            mock_run.return_value = (0, '100\\x1fRUNNING\\x1fNone\\x1fnode1',
+                                     '')
             result = client.query_jobs()
             mock_run.assert_called_once_with(
                 f'squeue --me -h -o "%i{slurm.SEP}%T{slurm.SEP}'
