@@ -440,6 +440,7 @@ def _create_virtual_instance(
         ssh_proxy_jump=ssh_proxy_jump,
         enable_interactive_auth=True,
         disable_identities_only=not identities_only,
+        ssh_certificate_file=ssh_certificate_file,
     )
     remote_home_dir = login_node_runner.get_remote_home_dir()
 
@@ -1235,7 +1236,9 @@ def get_command_runners(
             container_args=container_args,
             enable_interactive_auth=True,
             # Allow ssh-agent and default key fallback for Slurm.
-            disable_identities_only=True) for instance_info in instances
+            disable_identities_only=True,
+            ssh_certificate_file=login_node_ssh_certificate_file,
+        ) for instance_info in instances
     ]
 
     return runners
