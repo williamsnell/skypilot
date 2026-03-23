@@ -36,6 +36,7 @@ def ssh_options_list(
     escape_percent_expand: bool = ...,
     ssh_log_file: Optional[str] = ...,
     disable_identities_only: bool = ...,
+    ssh_certificate_file: Optional[str] = ...,
 ) -> List[str]:
     ...
 
@@ -208,6 +209,7 @@ class SSHCommandRunner(CommandRunner):
     port: int
     ssh_user: str
     ssh_private_key: Optional[str]
+    ssh_certificate_file: Optional[str]
     ssh_control_name: Optional[str]
     docker_user: str
     disable_control_master: Optional[bool]
@@ -228,6 +230,7 @@ class SSHCommandRunner(CommandRunner):
         port_forward_execute_remote_command: Optional[bool] = ...,
         enable_interactive_auth: bool = ...,
         disable_identities_only: bool = ...,
+        ssh_certificate_file: Optional[str] = ...,
     ) -> None:
         ...
 

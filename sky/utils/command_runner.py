@@ -210,6 +210,7 @@ def ssh_options_list(
     escape_percent_expand: bool = False,
     ssh_log_file: Optional[str] = None,
     disable_identities_only: bool = False,
+    ssh_certificate_file: Optional[str] = None,
 ) -> List[str]:
     """Returns a list of sane options for 'ssh'."""
     if connect_timeout is None:
@@ -277,6 +278,9 @@ def ssh_options_list(
         '-i',
         ssh_private_key,
     ] if ssh_private_key is not None else []
+
+    if ssh_certificate_file is not None:
+        arg_dict['CertificateFile'] = ssh_certificate_file
 
     if docker_ssh_proxy_command is not None:
         logger.debug(f'--- Docker SSH Proxy: {docker_ssh_proxy_command} ---')
@@ -888,6 +892,7 @@ class SSHCommandRunner(CommandRunner):
         port_forward_execute_remote_command: Optional[bool] = False,
         enable_interactive_auth: bool = False,
         disable_identities_only: bool = False,
+        ssh_certificate_file: Optional[str] = None,
     ):
         """Initialize SSHCommandRunner.
 
@@ -923,10 +928,14 @@ class SSHCommandRunner(CommandRunner):
             disable_identities_only: If True, do not set IdentitiesOnly=yes.
                 This allows SSH to use keys from ssh-agent and default key
                 locations in addition to any explicitly specified key.
+            ssh_certificate_file: Optional path to an SSH certificate file
+                to pass via '-o CertificateFile'. Used for clusters requiring
+                signed SSH certificate authentication.
         """
         super().__init__(node)
         ip, port = node
         self.ssh_private_key = ssh_private_key
+        self.ssh_certificate_file = ssh_certificate_file
         self.ssh_control_name = (
             None if ssh_control_name is None else hashlib.md5(
                 ssh_control_name.encode()).hexdigest()[:_HASH_MAX_LENGTH])
@@ -974,7 +983,8 @@ class SSHCommandRunner(CommandRunner):
                     ssh_proxy_command=inner_proxy_command,
                     port=inner_proxy_port,
                     disable_control_master=self.disable_control_master,
-                    disable_identities_only=self.disable_identities_only) +
+                    disable_identities_only=self.disable_identities_only,
+                    ssh_certificate_file=ssh_certificate_file) +
                 ['-W', '%h:%p', f'{ssh_user}@{ip}'])
         else:
             self.ip = ip
@@ -1054,6 +1064,7 @@ class SSHCommandRunner(CommandRunner):
             disable_control_master=self.disable_control_master,
             ssh_log_file=ssh_log_file,
             disable_identities_only=self.disable_identities_only,
+            ssh_certificate_file=self.ssh_certificate_file,
         ) + [f'{self.ssh_user}@{self.ip}']
 
     def _retry_with_interactive_auth(
@@ -1394,7 +1405,8 @@ class SSHCommandRunner(CommandRunner):
                 docker_ssh_proxy_command=docker_ssh_proxy_command,
                 port=self.port,
                 disable_control_master=self.disable_control_master,
-                disable_identities_only=self.disable_identities_only))
+                disable_identities_only=self.disable_identities_only,
+                ssh_certificate_file=self.ssh_certificate_file))
         rsh_option = f'ssh {ssh_options}'
         self._rsync(source,
                     target,

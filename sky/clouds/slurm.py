@@ -523,6 +523,8 @@ class Slurm(clouds.Cloud):
             # TODO(jwj): Solve naming collision with 'ssh_private_key'.
             # Please refer to slurm-ray.yml.j2 'ssh' and 'auth' sections.
             'slurm_private_key': slurm_utils.get_identity_file(ssh_config_dict),
+            'slurm_certificate_file':
+                slurm_utils.get_certificate_file(ssh_config_dict),
             'slurm_sshd_host_key_filename':
                 (slurm_utils.SLURM_SSHD_HOST_KEY_FILENAME),
             'slurm_cluster_name_env_var':
@@ -655,6 +657,8 @@ class Slurm(clouds.Cloud):
                     ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
                     ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),
                     identities_only=slurm_utils.get_identities_only(
+                        ssh_config_dict),
+                    ssh_certificate_file=slurm_utils.get_certificate_file(
                         ssh_config_dict),
                 )
                 info = client.info()

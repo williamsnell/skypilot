@@ -281,6 +281,7 @@ def _create_virtual_instance(
     ssh_proxy_command = ssh_config_dict.get('proxycommand', None)
     ssh_proxy_jump = ssh_config_dict.get('proxyjump', None)
     identities_only = ssh_config_dict.get('identities_only', False)
+    ssh_certificate_file = ssh_config_dict.get('certificate_file', None)
     partition = slurm_utils.get_partition_from_config(provider_config)
 
     client = slurm.SlurmClient(
@@ -291,6 +292,7 @@ def _create_virtual_instance(
         ssh_proxy_command=ssh_proxy_command,
         ssh_proxy_jump=ssh_proxy_jump,
         identities_only=identities_only,
+        ssh_certificate_file=ssh_certificate_file,
     )
 
     slurm_cluster = slurm_utils.get_slurm_cluster_from_config(provider_config)
@@ -750,6 +752,7 @@ def query_instances(
     ssh_proxy_command = ssh_config_dict.get('proxycommand', None)
     ssh_proxy_jump = ssh_config_dict.get('proxyjump', None)
     identities_only = ssh_config_dict.get('identities_only', False)
+    ssh_certificate_file = ssh_config_dict.get('certificate_file', None)
 
     client = slurm.SlurmClient(
         ssh_host,
@@ -759,6 +762,7 @@ def query_instances(
         ssh_proxy_command=ssh_proxy_command,
         ssh_proxy_jump=ssh_proxy_jump,
         identities_only=identities_only,
+        ssh_certificate_file=ssh_certificate_file,
     )
 
     # Map Slurm job states to SkyPilot ClusterStatus
@@ -850,6 +854,7 @@ def get_cluster_info(
     ssh_proxy_command = ssh_config_dict.get('proxycommand', None)
     ssh_proxy_jump = ssh_config_dict.get('proxyjump', None)
     identities_only = ssh_config_dict.get('identities_only', False)
+    ssh_certificate_file = ssh_config_dict.get('certificate_file', None)
 
     client = slurm.SlurmClient(
         ssh_host,
@@ -859,6 +864,7 @@ def get_cluster_info(
         ssh_proxy_command=ssh_proxy_command,
         ssh_proxy_jump=ssh_proxy_jump,
         identities_only=identities_only,
+        ssh_certificate_file=ssh_certificate_file,
     )
 
     # Find running job for this cluster
@@ -949,6 +955,7 @@ def terminate_instances(
         ssh_proxy_command = ssh_config_dict.get('proxycommand', None)
         ssh_proxy_jump = ssh_config_dict.get('proxyjump', None)
         identities_only = ssh_config_dict.get('identities_only', False)
+        ssh_certificate_file = ssh_config_dict.get('certificate_file', None)
 
         client = slurm.SlurmClient(
             ssh_host,
@@ -958,6 +965,7 @@ def terminate_instances(
             ssh_proxy_command=ssh_proxy_command,
             ssh_proxy_jump=ssh_proxy_jump,
             identities_only=identities_only,
+            ssh_certificate_file=ssh_certificate_file,
         )
     tracker = client.job_tracker(cluster_name_on_cloud)
     tracker.poll()
@@ -1067,6 +1075,8 @@ def get_command_runners(
     login_node_ssh_proxy_jump = login_node_ssh_config.get('proxyjump', None)
     login_node_identities_only = login_node_ssh_config.get(
         'identities_only', False)
+    login_node_ssh_certificate_file = login_node_ssh_config.get(
+        'certificate_file', None)
     # For Slurm, multiple SkyPilot clusters may share the same underlying
     # Slurm login node. By using a fixed ssh_control_name ('__default__'),
     # we ensure that all connections to the same login node reuse the same
@@ -1085,6 +1095,7 @@ def get_command_runners(
         ssh_proxy_command=login_node_ssh_proxy_command,
         ssh_proxy_jump=login_node_ssh_proxy_jump,
         identities_only=login_node_identities_only,
+        ssh_certificate_file=login_node_ssh_certificate_file,
     )
     remote_home_dir = client.get_remote_home_dir()
 

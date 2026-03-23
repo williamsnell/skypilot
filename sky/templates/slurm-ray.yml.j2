@@ -23,6 +23,9 @@ provider:
 {% if slurm_private_key is not none %}
     private_key: {{slurm_private_key}}
 {% endif %}
+{% if slurm_certificate_file is not none %}
+    certificate_file: {{slurm_certificate_file}}
+{% endif %}
 {% if slurm_proxy_command is not none %}
     proxycommand: {{slurm_proxy_command | tojson }}
 {% endif %}

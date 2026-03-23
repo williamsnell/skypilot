@@ -106,6 +106,11 @@ def get_identities_only(ssh_config_dict: Dict[str, Any]) -> bool:
     return identities_only.lower() == 'yes'
 
 
+def get_certificate_file(ssh_config_dict: Dict[str, Any]) -> Optional[str]:
+    """Get the CertificateFile from SSH config, or None if not specified."""
+    return ssh_config_dict.get('certificatefile', None)
+
+
 @annotations.lru_cache(scope='request')
 def _get_slurm_nodes_info(cluster: str) -> List[slurm.NodeInfo]:
     cache_key = f'slurm:nodes_info:{cluster}'
@@ -124,6 +129,7 @@ def _get_slurm_nodes_info(cluster: str) -> List[slurm.NodeInfo]:
         ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
         ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),
         identities_only=get_identities_only(ssh_config_dict),
+        ssh_certificate_file=get_certificate_file(ssh_config_dict),
     )
     nodes_info = client.info_nodes()
 
@@ -161,6 +167,7 @@ def get_proctrack_type(cluster: str) -> Optional[str]:
         ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
         ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),
         identities_only=get_identities_only(ssh_config_dict),
+        ssh_certificate_file=get_certificate_file(ssh_config_dict),
     )
     proctrack_type = client.get_proctrack_type()
 
@@ -208,6 +215,7 @@ def _check_cluster_feature(
         ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
         ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),
         identities_only=get_identities_only(ssh_config_dict),
+        ssh_certificate_file=get_certificate_file(ssh_config_dict),
     )
     enabled = check_fn(client)
 
@@ -432,6 +440,7 @@ def get_cluster_default_partition(cluster_name: str) -> Optional[str]:
         ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
         ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),
         identities_only=get_identities_only(ssh_config_dict),
+        ssh_certificate_file=get_certificate_file(ssh_config_dict),
     )
 
     return client.get_default_partition()
@@ -836,6 +845,7 @@ def _get_slurm_node_info_list(
         ssh_proxy_command=slurm_config_dict.get('proxycommand', None),
         ssh_proxy_jump=slurm_config_dict.get('proxyjump', None),
         identities_only=get_identities_only(slurm_config_dict),
+        ssh_certificate_file=get_certificate_file(slurm_config_dict),
     )
     node_infos = slurm_client.info_nodes()
 
@@ -985,6 +995,7 @@ def get_partition_infos(cluster_name: str) -> Dict[str, slurm.SlurmPartition]:
             ssh_proxy_command=slurm_config_dict.get('proxycommand', None),
             ssh_proxy_jump=slurm_config_dict.get('proxyjump', None),
             identities_only=get_identities_only(slurm_config_dict),
+            ssh_certificate_file=get_certificate_file(slurm_config_dict),
         )
 
         partitions_info = client.get_partitions_info()

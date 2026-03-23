@@ -104,6 +104,7 @@ class SlurmClient:
         ssh_proxy_jump: Optional[str] = None,
         is_inside_slurm_cluster: bool = False,
         identities_only: Optional[bool] = None,
+        ssh_certificate_file: Optional[str] = None,
     ):
         """Initialize SlurmClient.
 
@@ -119,6 +120,8 @@ class SlurmClient:
             identities_only: If True, only use the specified identity file and
                 don't try ssh-agent keys. If None, defaults to False (allows
                 ssh-agent fallback for backward compatibility).
+            ssh_certificate_file: Optional path to an SSH certificate file
+                for clusters requiring signed certificate authentication.
         """
         self.ssh_host = ssh_host
         self.ssh_port = ssh_port
@@ -148,6 +151,7 @@ class SlurmClient:
                 ssh_proxy_jump=ssh_proxy_jump,
                 enable_interactive_auth=True,
                 disable_identities_only=not identities_only,
+                ssh_certificate_file=ssh_certificate_file,
             )
 
     def _run_slurm_cmd(self, cmd: str) -> Tuple[int, str, str]:
