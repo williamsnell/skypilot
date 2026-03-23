@@ -544,6 +544,7 @@ class Slurm(clouds.Cloud):
                 (constants.SKY_CLUSTER_NAME_ENV_VAR_KEY),
             'image_id': image_id,
             'sbatch_options': sbatch_options,
+            'docker_login_config': resources.docker_login_config,
             # Only resolve the container runtime when an image is
             # requested, to avoid unnecessary SSH probes during
             # auto-detection.

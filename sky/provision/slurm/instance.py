@@ -556,8 +556,22 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
             # containers. Each srun invocation creates a fresh container
             # from the locally cached image.
             podman_mount_args = ' '.join(f'-v {m}' for m in mount_paths)
+            # Login to private registry if credentials are provided.
+            docker_login_config = provider_config.get('docker_login_config')
+            login_block = ''
+            if docker_login_config:
+                login_block = (
+                    f'echo "[container] Logging in to '
+                    f'{shlex.quote(docker_login_config["server"])}"\n'
+                    f'podman-hpc login '
+                    f'--username '
+                    f'{shlex.quote(docker_login_config["username"])} '
+                    f'--password '
+                    f'{shlex.quote(docker_login_config["password"])} '
+                    f'{shlex.quote(docker_login_config["server"])}\n')
             container_block = (
                 f'CONTAINER_START=$SECONDS\n'
+                f'{login_block}'
                 f'echo "[container] Pulling image with podman-hpc"\n'
                 f'srun --nodes={num_nodes} --ntasks-per-node=1 '
                 f'podman-hpc pull {shlex.quote(container_image)}\n'
