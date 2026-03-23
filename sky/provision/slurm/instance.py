@@ -615,7 +615,7 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'srun --overlap '
                 f'{"--label " if num_nodes > 1 else ""}--unbuffered '
                 f'--nodes={num_nodes} --ntasks-per-node=1 '
-                f'podman-hpc run --rm --gpu --openmpi-pmi2 '
+                f'podman-hpc run --rm --gpu '
                 f'{podman_mount_args} '
                 f'{shlex.quote(container_image)} '
                 f'bash -c {container_cmd} &\n'
@@ -1164,7 +1164,7 @@ def _build_podman_hpc_args(container_image: str, sky_cluster_home_dir: str,
     if not sky_cluster_home_dir.startswith(remote_home_dir):
         mount_paths.append(f'{sky_cluster_home_dir}:{sky_cluster_home_dir}')
     mount_args = ' '.join(f'-v {m}' for m in mount_paths)
-    return (f'podman-hpc run --rm --gpu --openmpi-pmi2 '
+    return (f'podman-hpc run --rm --gpu '
             f'{mount_args} {shlex.quote(container_image)}')
 
 
