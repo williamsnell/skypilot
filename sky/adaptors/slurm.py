@@ -591,6 +591,36 @@ class SlurmClient:
         """
         return [partition.name for partition in self.get_partitions_info()]
 
+    def get_partition_qos_max_wall(self, partition: str) -> Optional[int]:
+        """Get the QOS MaxWall for a partition, in seconds.
+
+        Queries the partition's assigned QOS and returns its
+        MaxWallDurationPerJob. Returns None if the QOS has no wall
+        limit, or if the query fails.
+        """
+        # Get the QOS name assigned to the partition.
+        cmd = f'scontrol show partition {partition}'
+        rc, stdout, stderr = self._run_slurm_cmd(cmd)
+        if rc != 0:
+            logger.debug(f'Failed to get partition info: {stderr}')
+            return None
+        qos_match = re.search(r'\bQoS=(\S+)', stdout)
+        if not qos_match or qos_match.group(1).lower() == 'n/a':
+            return None
+        qos_name = qos_match.group(1)
+
+        # Query the QOS MaxWall.
+        cmd = (f'sacctmgr show qos {qos_name} '
+               f'format=MaxWall -n -P')
+        rc, stdout, stderr = self._run_slurm_cmd(cmd)
+        if rc != 0:
+            logger.debug(f'Failed to query QOS {qos_name}: {stderr}')
+            return None
+        max_wall_str = stdout.strip()
+        if not max_wall_str:
+            return None
+        return _parse_maxtime(f'MaxTime={max_wall_str}')
+
     def get_proctrack_type(self) -> Optional[str]:
         """Get the ProctrackType from Slurm configuration.
 

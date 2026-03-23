@@ -757,6 +757,7 @@ class TestProvisionTimeoutPassthrough:
         mock_client.get_job_nodes.return_value = (['node1'], {
             'node1': '10.0.0.5'
         })
+        mock_client.get_partition_qos_max_wall.return_value = None
         mock_slurm_client.return_value = mock_client
 
         mock_runner = mock.MagicMock()
@@ -832,6 +833,7 @@ class TestProvisionTimeoutPassthrough:
         mock_client.get_job_nodes.return_value = (['node1'], {
             'node1': '10.0.0.5'
         })
+        mock_client.get_partition_qos_max_wall.return_value = None
         mock_slurm_client.return_value = mock_client
 
         mock_runner = mock.MagicMock()
@@ -907,6 +909,7 @@ class TestProvisionTimeoutPassthrough:
         mock_client.get_job_nodes.return_value = (['node1'], {
             'node1': '10.0.0.5'
         })
+        mock_client.get_partition_qos_max_wall.return_value = None
         mock_slurm_client.return_value = mock_client
 
         mock_runner = mock.MagicMock()
@@ -981,6 +984,7 @@ class TestCreateVirtualInstance:
         mock_client.get_job_nodes.return_value = (['node1'], {
             'node1': '10.0.0.5'
         })
+        mock_client.get_partition_qos_max_wall.return_value = None
         mock_slurm_client.return_value = mock_client
 
         mock_runner = mock.MagicMock()

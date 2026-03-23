@@ -302,7 +302,13 @@ def _create_virtual_instance(
     if partition_info is None:
         raise ValueError(f'Partition info for {partition} not found '
                          f'for SLURM cluster {slurm_cluster}')
-    max_time = slurm_utils.format_slurm_duration(partition_info.maxtime)
+    # Use the most restrictive of partition MaxTime and QOS MaxWall.
+    effective_maxtime = partition_info.maxtime
+    qos_max_wall = client.get_partition_qos_max_wall(partition)
+    if qos_max_wall is not None:
+        if effective_maxtime is None or qos_max_wall < effective_maxtime:
+            effective_maxtime = qos_max_wall
+    max_time = slurm_utils.format_slurm_duration(effective_maxtime)
     poll_interval: float = provider_config.get('poll_interval',
                                                _DEFAULT_POLL_INTERVAL_SECONDS)
     tracker = client.job_tracker(cluster_name_on_cloud, poll_interval)
