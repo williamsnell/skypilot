@@ -804,6 +804,7 @@ class TestProvisionTimeoutPassthrough:
             'gpu',
             mock.ANY,
             poll_interval=10,
+            sbatch_log_dir=mock.ANY,
         )
         # get_job_nodes should be called without wait params
         mock_client.get_job_nodes.assert_called_once_with(mock.ANY)
@@ -881,6 +882,7 @@ class TestProvisionTimeoutPassthrough:
             'gpu',
             mock.ANY,
             poll_interval=10,
+            sbatch_log_dir=mock.ANY,
         )
         # get_job_nodes should be called without wait params
         mock_client.get_job_nodes.assert_called_once_with(mock.ANY)
@@ -957,6 +959,7 @@ class TestProvisionTimeoutPassthrough:
             'gpu',
             mock.ANY,
             poll_interval=30,
+            sbatch_log_dir=mock.ANY,
         )
 
 

@@ -130,6 +130,7 @@ def _wait_for_job_nodes(
     partition: str,
     on_pending: Callable[[str, Optional[str], Optional[int]], None],
     poll_interval: float = _DEFAULT_POLL_INTERVAL_SECONDS,
+    sbatch_log_dir: Optional[str] = None,
 ) -> None:
     """Wait for a Slurm job to have nodes allocated.
 
@@ -145,7 +146,24 @@ def _wait_for_job_nodes(
             reason and pending_count may be None.
         poll_interval: Seconds between squeue polls. Defaults to
             _DEFAULT_POLL_INTERVAL_SECONDS.
+        sbatch_log_dir: If set, on failure try to read the sbatch
+            output log from this directory and include it in the
+            error message.
     """
+
+    def _get_sbatch_log_tail() -> str:
+        """Try to fetch the last lines of the sbatch output log."""
+        if sbatch_log_dir is None:
+            return ''
+        log_path = _sbatch_log_path(sbatch_log_dir, job_id)
+        try:
+            content = client.read_file(log_path)
+            if content:
+                return f'\n--- sbatch output (last lines) ---\n{content}'
+        except Exception:  # pylint: disable=broad-except
+            pass
+        return ''
+
     start_time = time.time()
     last_state = None
     last_pending_count_time = 0.0
@@ -161,11 +179,12 @@ def _wait_for_job_nodes(
 
         if state is None:
             raise RuntimeError(f'Job {job_id} not found. It may have been '
-                               'cancelled or failed.')
+                               f'cancelled or failed.{_get_sbatch_log_tail()}')
 
         if state in ('COMPLETED', 'CANCELLED', 'FAILED', 'TIMEOUT'):
             raise RuntimeError(f'Job {job_id} terminated with state {state} '
-                               'before nodes were allocated.')
+                               f'before nodes were allocated.'
+                               f'{_get_sbatch_log_tail()}')
 
         if state in ('PENDING', 'CONFIGURING') and on_pending is not None:
             try:
@@ -404,7 +423,8 @@ def _create_virtual_instance(
                             provision_timeout,
                             partition,
                             _on_pending,
-                            poll_interval=poll_interval)
+                            poll_interval=poll_interval,
+                            sbatch_log_dir=None)
         nodes, _ = client.get_job_nodes(job_id)
         # Reset spinner since nodes are now allocated
         rich_utils.force_update_status(
@@ -535,7 +555,10 @@ def _create_virtual_instance(
 set -e
 echo "[container-init] Starting..."
 INIT_START=$SECONDS
-apt-get update
+# Allow apt-get update to fail partially — some HTTPS repos may be
+# unreachable on HPC networks. The core Ubuntu repos (HTTP) are
+# sufficient for the packages we need.
+apt-get update || echo "[container-init] WARNING: apt-get update had errors (continuing)"
 apt-get install -y ca-certificates rsync curl git wget fuse
 echo 'alias sudo=""' >> ~/.bashrc
 echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
@@ -754,7 +777,8 @@ touch {sky_cluster_home_dir}/.hushlogin
                         provision_timeout,
                         partition,
                         _on_pending,
-                        poll_interval=poll_interval)
+                        poll_interval=poll_interval,
+                        sbatch_log_dir=sbatch_log_base_dir)
     nodes, _ = client.get_job_nodes(job_id)
     # Reset spinner since nodes are now allocated
     rich_utils.force_update_status(
