@@ -558,14 +558,24 @@ def _create_virtual_instance(
         # This allows scripts with 'sudo' commands to work without modification.
         # For containers, ~ is /root which is isolated inside the container,
         # so modifying bashrc doesn't affect non-containerized sessions.
-        container_init_script = """\
+        if container_runtime == 'podman-hpc':
+            # Podman-HPC containers are ephemeral — packages installed
+            # here are lost when the container exits. The image must
+            # already contain the required packages (rsync, curl, git).
+            container_init_script = """\
+set -e
+echo "[container-init] Starting..."
+echo 'alias sudo=""' >> ~/.bashrc
+echo "[container-init] Ready"
+"""
+        else:
+            # Pyxis containers persist via :create/:exec, so packages
+            # installed here are retained for subsequent srun calls.
+            container_init_script = """\
 set -e
 echo "[container-init] Starting..."
 INIT_START=$SECONDS
-# Allow apt-get update to fail partially — some HTTPS repos may be
-# unreachable on HPC networks. The core Ubuntu repos (HTTP) are
-# sufficient for the packages we need.
-apt-get update || echo "[container-init] WARNING: apt-get update had errors (continuing)"
+apt-get update
 apt-get install -y ca-certificates rsync curl git wget fuse
 echo 'alias sudo=""' >> ~/.bashrc
 echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"

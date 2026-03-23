@@ -59,10 +59,7 @@ mkdir -p /home/testuser/.sky_clusters/test-cluster/.sky_container_init_done
 srun --overlap --unbuffered --nodes=1 --ntasks-per-node=1 --container-image='nvcr.io#nvidia/pytorch:24.01-py3' --container-name=test-cluster:create --container-mounts="/home/testuser:/home/testuser,/tmp/ccache_$(id -u):/var/cache/ccache" --container-remap-root --no-container-mount-home --container-writable bash -c 'set -e
 echo "[container-init] Starting..."
 INIT_START=$SECONDS
-# Allow apt-get update to fail partially — some HTTPS repos may be
-# unreachable on HPC networks. The core Ubuntu repos (HTTP) are
-# sufficient for the packages we need.
-apt-get update || echo "[container-init] WARNING: apt-get update had errors (continuing)"
+apt-get update
 apt-get install -y ca-certificates rsync curl git wget fuse
 echo '"'"'alias sudo=""'"'"' >> ~/.bashrc
 echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
