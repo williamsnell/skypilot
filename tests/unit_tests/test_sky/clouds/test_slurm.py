@@ -470,7 +470,10 @@ class TestSbatchOptionsPrecedence:
                     return_value=['gpu', 'cpu']), \
                  patch(
                     'sky.clouds.slurm.slurm_utils.resolve_gres_gpu_type',
-                    side_effect=lambda cluster, t, count=1, partition=None: t):
+                    side_effect=lambda cluster, t, count=1, partition=None: t), \
+                 patch(
+                    'sky.clouds.slurm.slurm_utils.resolve_container_runtime',
+                    return_value=None):
                 deploy_vars = cloud.make_deploy_resources_variables(
                     resources=mock_resources,
                     cluster_name=mock.MagicMock(),
@@ -683,7 +686,9 @@ class TestSlurmProvisionTimeout:
              patch('sky.clouds.slurm.slurm_utils.get_partitions',
                    return_value=['default', 'gpu', 'cpu']), \
              patch('sky.clouds.slurm.slurm_utils.resolve_gres_gpu_type',
-                   side_effect=lambda cluster, t, count=1, partition=None: t):
+                   side_effect=lambda cluster, t, count=1, partition=None: t), \
+             patch('sky.clouds.slurm.slurm_utils.resolve_container_runtime',
+                   return_value=None):
             deploy_vars = cloud.make_deploy_resources_variables(
                 resources=mock_resources,
                 cluster_name=mock.MagicMock(),

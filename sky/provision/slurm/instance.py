@@ -470,11 +470,12 @@ def _create_virtual_instance(
     slurm_marker_file = (
         f'{sky_cluster_home_dir}/{slurm_utils.SLURM_MARKER_FILE}')
 
-    # For non-Docker Hub registries, pyxis/enroot requires '#' separator
-    # between registry and path. See:
-    # https://github.com/NVIDIA/pyxis/wiki/Usage#registry-syntax
+    container_runtime = provider_config.get('container_runtime', None)
     container_image = resources.get('image_id')
-    if container_image is not None:
+    if container_image is not None and container_runtime != 'podman-hpc':
+        # For non-Docker Hub registries, pyxis/enroot requires '#' separator
+        # between registry and path. See:
+        # https://github.com/NVIDIA/pyxis/wiki/Usage#registry-syntax
         if container_image.endswith('.sqsh'):
             # Local .sqsh file, use path directly.
             pass
@@ -503,13 +504,6 @@ def _create_virtual_instance(
     # Build container initialization block if container image specified
     container_block = ''
     if container_image is not None:
-        # Note: /dev/shm is NOT mounted here because enroot handles it:
-        # - If ENROOT_RESTRICT_DEV is set: /dev is restricted but /dev/shm is
-        #   explicitly mounted by the 10-devices.sh hook
-        # - If ENROOT_RESTRICT_DEV is unset: /dev is not restricted, so
-        #   /dev/shm is inherited from the host
-        # See:
-        # https://github.com/NVIDIA/enroot/blob/main/conf/hooks/10-devices.sh
         host_ccache_dir = '/tmp/ccache_$(id -u)'
         container_ccache_dir = '/var/cache/ccache'
         mount_paths = [
@@ -521,7 +515,6 @@ def _create_virtual_instance(
         # it so the container can access sky_cluster_home_dir.
         if workdir is not None and workdir != remote_home_dir:
             mount_paths.append(f'{workdir}:{workdir}')
-        container_mounts = ','.join(mount_paths)
         # Add sudo alias to bashrc since we're already root in the container.
         # This allows scripts with 'sudo' commands to work without modification.
         # For containers, ~ is /root which is isolated inside the container,
@@ -545,39 +538,101 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
         container_cmd = shlex.quote(
             f'{container_init_script}'
             f'touch {container_init_done_dir}/$SLURM_PROCID && sleep infinity')
-        container_block = (
-            f'srun --nodes={num_nodes} mkdir -p {host_ccache_dir}\n'
-            f'CONTAINER_START=$SECONDS\n'
-            f'echo "[container] Initializing {container_name} on all nodes"\n'
-            f'rm -rf {container_init_done_dir}\n'
-            f'mkdir -p {container_init_done_dir}\n'
-            f'srun --overlap {"--label " if num_nodes > 1 else ""}--unbuffered '
-            f'--nodes={num_nodes} --ntasks-per-node=1 '
-            f'--container-image={shlex.quote(container_image)} '
-            f'--container-name={shlex.quote(container_name)}:create '
-            f'--container-mounts="{container_mounts}" '
-            f'--container-remap-root '
-            f'--no-container-mount-home '
-            f'--container-writable '
-            f'bash -c {container_cmd} &\n'
-            f'CONTAINER_PID=$!\n'
-            f'while true; do\n'
-            f'  num_ready=$(ls -1 {container_init_done_dir} 2>/dev/null | '
-            f'wc -l)\n'
-            f'  if [ "$num_ready" -ge "{num_nodes}" ]; then\n'
-            f'    break\n'
-            f'  fi\n'
-            f'  if ! kill -0 $CONTAINER_PID 2>/dev/null; then\n'
-            f'    echo "[container] ERROR: Container initialization failed."\n'
-            f'    echo "[container] Only $num_ready of {num_nodes}'
-            f' node(s) completed initialization."\n'
-            f'    wait $CONTAINER_PID\n'
-            f'    exit $?\n'
-            f'  fi\n'
-            f'  sleep 1\n'
-            f'done\n'
-            f'echo "[container] Ready in $((SECONDS - CONTAINER_START))s"\n'
-            f'touch {container_marker_file} {ready_signal}')
+
+        if container_runtime == 'podman-hpc':
+            # Podman-HPC: pull and migrate image, then run ephemeral
+            # containers. Each srun invocation creates a fresh container
+            # from the locally cached image.
+            podman_mount_args = ' '.join(f'-v {m}' for m in mount_paths)
+            container_block = (
+                f'CONTAINER_START=$SECONDS\n'
+                f'echo "[container] Pulling image with podman-hpc"\n'
+                f'srun --nodes={num_nodes} --ntasks-per-node=1 '
+                f'podman-hpc pull {shlex.quote(container_image)}\n'
+                f'echo "[container] Migrating image to squashfs"\n'
+                f'srun --nodes={num_nodes} --ntasks-per-node=1 '
+                f'podman-hpc migrate {shlex.quote(container_image)}\n'
+                f'srun --nodes={num_nodes} mkdir -p {host_ccache_dir}\n'
+                f'rm -rf {container_init_done_dir}\n'
+                f'mkdir -p {container_init_done_dir}\n'
+                f'echo "[container] Initializing on all nodes"\n'
+                f'srun --overlap '
+                f'{"--label " if num_nodes > 1 else ""}--unbuffered '
+                f'--nodes={num_nodes} --ntasks-per-node=1 '
+                f'podman-hpc run --rm --gpu --openmpi-pmi2 '
+                f'{podman_mount_args} '
+                f'{shlex.quote(container_image)} '
+                f'bash -c {container_cmd} &\n'
+                f'CONTAINER_PID=$!\n'
+                f'while true; do\n'
+                f'  num_ready=$(ls -1 {container_init_done_dir} '
+                f'2>/dev/null | wc -l)\n'
+                f'  if [ "$num_ready" -ge "{num_nodes}" ]; then\n'
+                f'    break\n'
+                f'  fi\n'
+                f'  if ! kill -0 $CONTAINER_PID 2>/dev/null; then\n'
+                f'    echo "[container] ERROR: '
+                f'Container initialization failed."\n'
+                f'    echo "[container] Only $num_ready of {num_nodes}'
+                f' node(s) completed initialization."\n'
+                f'    wait $CONTAINER_PID\n'
+                f'    exit $?\n'
+                f'  fi\n'
+                f'  sleep 1\n'
+                f'done\n'
+                f'echo "[container] Ready in '
+                f'$((SECONDS - CONTAINER_START))s"\n'
+                f'echo {shlex.quote(container_image)} > '
+                f'{container_marker_file}\n'
+                f'touch {ready_signal}')
+        else:
+            # Pyxis/Enroot: create a persistent named container, then
+            # reattach via :exec on subsequent srun calls.
+            # Note: /dev/shm is NOT mounted here because enroot handles it:
+            # - If ENROOT_RESTRICT_DEV is set: /dev is restricted but
+            #   /dev/shm is explicitly mounted by the 10-devices.sh hook
+            # - If ENROOT_RESTRICT_DEV is unset: /dev is not restricted, so
+            #   /dev/shm is inherited from the host
+            # See:
+            # https://github.com/NVIDIA/enroot/blob/main/conf/hooks/10-devices.sh
+            container_mounts = ','.join(mount_paths)
+            container_block = (
+                f'srun --nodes={num_nodes} mkdir -p {host_ccache_dir}\n'
+                f'CONTAINER_START=$SECONDS\n'
+                f'echo "[container] Initializing {container_name} '
+                f'on all nodes"\n'
+                f'rm -rf {container_init_done_dir}\n'
+                f'mkdir -p {container_init_done_dir}\n'
+                f'srun --overlap '
+                f'{"--label " if num_nodes > 1 else ""}--unbuffered '
+                f'--nodes={num_nodes} --ntasks-per-node=1 '
+                f'--container-image={shlex.quote(container_image)} '
+                f'--container-name={shlex.quote(container_name)}:create '
+                f'--container-mounts="{container_mounts}" '
+                f'--container-remap-root '
+                f'--no-container-mount-home '
+                f'--container-writable '
+                f'bash -c {container_cmd} &\n'
+                f'CONTAINER_PID=$!\n'
+                f'while true; do\n'
+                f'  num_ready=$(ls -1 {container_init_done_dir} '
+                f'2>/dev/null | wc -l)\n'
+                f'  if [ "$num_ready" -ge "{num_nodes}" ]; then\n'
+                f'    break\n'
+                f'  fi\n'
+                f'  if ! kill -0 $CONTAINER_PID 2>/dev/null; then\n'
+                f'    echo "[container] ERROR: '
+                f'Container initialization failed."\n'
+                f'    echo "[container] Only $num_ready of {num_nodes}'
+                f' node(s) completed initialization."\n'
+                f'    wait $CONTAINER_PID\n'
+                f'    exit $?\n'
+                f'  fi\n'
+                f'  sleep 1\n'
+                f'done\n'
+                f'echo "[container] Ready in '
+                f'$((SECONDS - CONTAINER_START))s"\n'
+                f'touch {container_marker_file} {ready_signal}')
 
     # By default stdout and stderr will be written to $HOME/slurm-%j.out
     # (because we invoke sbatch from $HOME). Redirect elsewhere to not pollute
@@ -1037,6 +1092,25 @@ def _build_pyxis_args(cluster_name_on_cloud: str) -> str:
     return f'--container-remap-root --container-name={quoted_name}:exec'
 
 
+def _build_podman_hpc_args(container_image: str, sky_cluster_home_dir: str,
+                           remote_home_dir: str) -> str:
+    """Build podman-hpc container args for srun.
+
+    Unlike Pyxis, podman-hpc containers are ephemeral — each srun invocation
+    starts a fresh container from the locally cached image. The returned
+    string is a command prefix placed between srun flags and bash -c.
+    """
+    mount_paths = [
+        f'{remote_home_dir}:{remote_home_dir}',
+    ]
+    # Mount the sky cluster home dir if it differs from remote home.
+    if not sky_cluster_home_dir.startswith(remote_home_dir):
+        mount_paths.append(f'{sky_cluster_home_dir}:{sky_cluster_home_dir}')
+    mount_args = ' '.join(f'-v {m}' for m in mount_paths)
+    return (f'podman-hpc run --rm --gpu --openmpi-pmi2 '
+            f'{mount_args} {shlex.quote(container_image)}')
+
+
 def get_command_runners(
     cluster_info: common.ClusterInfo,
     **credentials: Dict[str, Any],
@@ -1125,8 +1199,18 @@ def get_command_runners(
     container_marker = (
         f'{sky_cluster_home_dir}/{slurm_utils.SLURM_CONTAINER_MARKER_FILE}')
     has_container = client.check_file_exists(container_marker)
-    container_args = _build_pyxis_args(
-        cluster_name_on_cloud) if has_container else None
+    container_args = None
+    if has_container:
+        container_runtime = provider_config.get('container_runtime', None)
+        if container_runtime == 'podman-hpc':
+            # Read the container image from the marker file (written
+            # during provisioning).
+            image_name = client.read_file(container_marker)
+            container_args = _build_podman_hpc_args(image_name,
+                                                    sky_cluster_home_dir,
+                                                    remote_home_dir)
+        else:
+            container_args = _build_pyxis_args(cluster_name_on_cloud)
 
     runners = [
         # Note: For Slurm, the external IP for all instances is the same,

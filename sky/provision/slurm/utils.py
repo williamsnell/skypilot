@@ -41,6 +41,8 @@ _SLURM_PROCTRACK_TYPE_CACHE_TTL = 24 * 60 * 60
 _SLURM_PYXIS_CHECK_CACHE_TTL = 24 * 60 * 60
 # FUSE availability is unlikely to change frequently.
 _SLURM_FUSE_CHECK_CACHE_TTL = 24 * 60 * 60
+# Podman-HPC availability is unlikely to change frequently.
+_SLURM_PODMAN_HPC_CHECK_CACHE_TTL = 24 * 60 * 60
 
 
 def expand_path_vars(path: str, env: Dict[str, str]) -> str:
@@ -109,6 +111,34 @@ def get_identities_only(ssh_config_dict: Dict[str, Any]) -> bool:
 def get_certificate_file(ssh_config_dict: Dict[str, Any]) -> Optional[str]:
     """Get the CertificateFile from SSH config, or None if not specified."""
     return ssh_config_dict.get('certificatefile', None)
+
+
+def get_container_runtime(ssh_config_dict: Dict[str, Any]) -> Optional[str]:
+    """Get ContainerRuntime from SSH config, or None if not specified.
+
+    Valid values: 'pyxis', 'podman-hpc'.
+    """
+    return ssh_config_dict.get('containerruntime', None)
+
+
+def resolve_container_runtime(ssh_config_dict: Dict[str, Any],
+                              cluster: str) -> Optional[str]:
+    """Resolve the container runtime for a cluster.
+
+    Uses explicit ContainerRuntime config if set, otherwise auto-detects
+    by checking for Pyxis then podman-hpc.
+
+    Returns:
+        'pyxis', 'podman-hpc', or None if no container runtime is available.
+    """
+    configured = get_container_runtime(ssh_config_dict)
+    if configured is not None:
+        return configured
+    if check_pyxis_enabled(cluster):
+        return 'pyxis'
+    if check_podman_hpc_enabled(cluster):
+        return 'podman-hpc'
+    return None
 
 
 @annotations.lru_cache(scope='request')
@@ -252,6 +282,18 @@ def check_fuse_enabled(cluster: str) -> bool:
     return _check_cluster_feature(cluster, 'fuse',
                                   lambda c: c.check_fuse_enabled(),
                                   _SLURM_FUSE_CHECK_CACHE_TTL)
+
+
+def check_podman_hpc_enabled(cluster: str) -> bool:
+    """Check if podman-hpc is available on a Slurm cluster.
+
+    Podman-HPC is a container runtime for HPC systems that can be used
+    as an alternative to Pyxis/Enroot. This function caches the result
+    per cluster since availability is unlikely to change frequently.
+    """
+    return _check_cluster_feature(cluster, 'podman_hpc',
+                                  lambda c: c.check_podman_hpc_enabled(),
+                                  _SLURM_PODMAN_HPC_CHECK_CACHE_TTL)
 
 
 class SlurmInstanceType:

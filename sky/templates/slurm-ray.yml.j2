@@ -15,6 +15,9 @@ provider:
   partition: {{slurm_partition}}
   provision_timeout: {{provision_timeout}}
   poll_interval: {{poll_interval}}
+{% if container_runtime is not none %}
+  container_runtime: {{container_runtime}}
+{% endif %}
 
   ssh:
     hostname: {{ssh_hostname}}

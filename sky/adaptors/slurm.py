@@ -620,6 +620,16 @@ class SlurmClient:
         rc, _, _ = self._run_slurm_cmd(cmd)
         return rc == 0
 
+    def check_podman_hpc_enabled(self) -> bool:
+        """Check if podman-hpc is available on the cluster.
+
+        Returns:
+            True if podman-hpc is installed, False otherwise.
+        """
+        cmd = 'command -v podman-hpc'
+        rc, _, _ = self._run_slurm_cmd(cmd)
+        return rc == 0
+
     def get_env(self) -> Dict[str, str]:
         """Fetch environment variables from the remote host.
 
@@ -640,6 +650,17 @@ class SlurmClient:
     def get_remote_home_dir(self) -> str:
         """Returns the remote user's home directory."""
         return self._runner.get_remote_home_dir()
+
+    def read_file(self, path: str) -> str:
+        """Read a file on the remote host and return its contents."""
+        cmd = f'cat {shlex.quote(path)}'
+        rc, stdout, stderr = self._run_slurm_cmd(cmd)
+        subprocess_utils.handle_returncode(rc,
+                                           cmd,
+                                           f'Failed to read file: {path}',
+                                           stderr=f'{stdout}\n{stderr}',
+                                           stream_logs=False)
+        return stdout.strip()
 
     def check_file_exists(self, path: str) -> bool:
         """Check if a file exists on the remote host."""

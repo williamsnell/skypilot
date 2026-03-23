@@ -55,9 +55,9 @@ class Slurm(clouds.Cloud):
             (f'Local disk is not supported on {_REPR}'),
         clouds.CloudImplementationFeatures.DOCKER_IMAGE:
             'Docker image is not supported on this Slurm cluster because '
-            'the Pyxis plugin is not installed. Please ask your cluster '
-            'administrator to install Pyxis '
-            '(https://github.com/NVIDIA/pyxis).',
+            'no supported container runtime was found (Pyxis or '
+            'podman-hpc). You can set ContainerRuntime in ~/.slurm/config '
+            'or ask your cluster administrator to install one.',
         clouds.CloudImplementationFeatures.STORAGE_MOUNTING:
             'Storage mounting is not supported on this Slurm cluster '
             'because FUSE is not enabled (/dev/fuse not found). '
@@ -118,8 +118,21 @@ class Slurm(clouds.Cloud):
             clusters = [cluster]
         for c in clusters:
             try:
-                # Docker image support requires the Pyxis SPANK plugin.
-                if slurm_utils.check_pyxis_enabled(c):
+                # Docker image support requires Pyxis or podman-hpc.
+                # Check explicit ContainerRuntime config first, then
+                # auto-detect.
+                ssh_config = slurm_utils.get_slurm_ssh_config()
+                ssh_config_dict = ssh_config.lookup(c)
+                configured_runtime = slurm_utils.get_container_runtime(
+                    ssh_config_dict)
+                has_container_runtime = False
+                if configured_runtime is not None:
+                    has_container_runtime = True
+                elif slurm_utils.check_pyxis_enabled(c):
+                    has_container_runtime = True
+                elif slurm_utils.check_podman_hpc_enabled(c):
+                    has_container_runtime = True
+                if has_container_runtime:
                     unsupported.pop(
                         clouds.CloudImplementationFeatures.DOCKER_IMAGE, None)
                 # Storage mounting requires FUSE (/dev/fuse).
@@ -531,6 +544,8 @@ class Slurm(clouds.Cloud):
                 (constants.SKY_CLUSTER_NAME_ENV_VAR_KEY),
             'image_id': image_id,
             'sbatch_options': sbatch_options,
+            'container_runtime': slurm_utils.resolve_container_runtime(
+                ssh_config_dict, cluster),
         }
 
         return deploy_vars
