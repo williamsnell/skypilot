@@ -619,11 +619,15 @@ def check_instance_fits(
             return (False, str(e))
 
         # Filter to nodes carrying the resolved raw type with enough GPUs.
+        # 'GPU' is the synthetic name for untyped GRES (e.g. 'gpu:4'),
+        # which has node_acc_type=None.
         gpu_nodes = []
         for node_info in nodes:
             node_acc_type, node_acc_count = get_gpu_type_and_count(
                 node_info.gres)
-            if (node_acc_type == resolved_type and node_acc_count >= acc_count):
+            display_type = (node_acc_type
+                            if node_acc_type is not None else 'GPU')
+            if (display_type == resolved_type and node_acc_count >= acc_count):
                 gpu_nodes.append(node_info)
 
         candidate_nodes = gpu_nodes
@@ -825,13 +829,17 @@ def resolve_gres_gpu_type(
                 continue
 
         node_acc_type, node_acc_count = get_gpu_type_and_count(node_info.gres)
-        if node_acc_type is None:
+        if node_acc_type is None and node_acc_count == 0:
             continue
-        all_gpu_types[node_acc_type] = all_gpu_types.get(node_acc_type, 0) + 1
+        # Use the synthetic 'GPU' label for untyped GRES (e.g. 'gpu:4')
+        # to match the catalog name generated in
+        # get_slurm_gpu_catalog_entry().
+        display_type = node_acc_type if node_acc_type is not None else 'GPU'
+        all_gpu_types[display_type] = (all_gpu_types.get(display_type, 0) + 1)
         if node_acc_count < requested_count:
             continue
-        if _accelerator_name_matches_slurm(requested_gpu_type, node_acc_type):
-            candidates[node_acc_type] = candidates.get(node_acc_type, 0) + 1
+        if _accelerator_name_matches_slurm(requested_gpu_type, display_type):
+            candidates[display_type] = (candidates.get(display_type, 0) + 1)
 
     if not candidates:
         partition_msg = f' in partition {partition!r}' if partition else ''
