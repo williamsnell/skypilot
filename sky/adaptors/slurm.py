@@ -815,12 +815,16 @@ class SlurmJobInfo:
         conn.commit()
         return conn
 
-    def poll(self) -> None:
+    def poll(self, block: bool = False) -> None:
         """Refresh job state from squeue if the cache is stale.
 
         Checks the most recent updated_at for this cluster. If the
         data is younger than poll_interval, the squeue call is skipped
         (cross-process deduplication).
+
+        Args:
+            block: If True, sleep until the cache becomes stale, then
+                poll. Guarantees the caller gets fresh data.
         """
         row = self._conn.execute(
             'SELECT MAX(updated_at) FROM slurm_jobs '
@@ -828,7 +832,12 @@ class SlurmJobInfo:
             (self._cluster_name,),
         ).fetchone()
         if row[0] is not None and time.time() - row[0] < self._poll_interval:
-            return  # Cache is fresh.
+            if block:
+                remaining = self._poll_interval - (time.time() - row[0])
+                if remaining > 0:
+                    time.sleep(remaining)
+            else:
+                return  # Cache is fresh.
 
         results = self._client.query_jobs(job_name=self._cluster_name,
                                           state_filters=['all'])

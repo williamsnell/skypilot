@@ -178,8 +178,15 @@ def _wait_for_job_nodes(
             last_state = state
 
         if state is None:
-            raise RuntimeError(f'Job {job_id} not found. It may have been '
-                               f'cancelled or failed.{_get_sbatch_log_tail()}')
+            # Job may not be visible in squeue immediately after
+            # submission. Wait for a fresh poll before giving up.
+            tracker.poll(block=True)
+            info = tracker.job_info(job_id)
+            if info is None:
+                raise RuntimeError(f'Job {job_id} not found. It may have been '
+                                   f'cancelled or failed.'
+                                   f'{_get_sbatch_log_tail()}')
+            state = info.state
 
         if state in ('COMPLETED', 'CANCELLED', 'FAILED', 'TIMEOUT'):
             raise RuntimeError(f'Job {job_id} terminated with state {state} '
