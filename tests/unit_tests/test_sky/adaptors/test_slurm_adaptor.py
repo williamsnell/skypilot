@@ -88,167 +88,6 @@ class TestInfoNodes:
             assert result[2].partition == 'tpu nodes'
 
 
-class TestCheckJobHasNodes:
-    """Test SlurmClient.check_job_has_nodes()."""
-
-    def test_returns_true_when_nodes_allocated(self):
-        """Test returns True when squeue returns node names."""
-        client = slurm.SlurmClient(
-            ssh_host='localhost',
-            ssh_port=22,
-            ssh_user='root',
-            ssh_key=None,
-        )
-
-        with mock.patch.object(client._runner, 'run') as mock_run:
-            mock_run.return_value = (0, 'node1,node2', '')
-            assert client.check_job_has_nodes('12345') is True
-            mock_run.assert_called_once_with(
-                'squeue -h --jobs 12345 -o "%N"',
-                require_outputs=True,
-                separate_stderr=True,
-                stream_logs=False,
-            )
-
-    def test_returns_false_when_no_nodes(self):
-        """Test returns False when squeue returns empty output."""
-        client = slurm.SlurmClient(
-            ssh_host='localhost',
-            ssh_port=22,
-            ssh_user='root',
-            ssh_key=None,
-        )
-
-        with mock.patch.object(client._runner, 'run') as mock_run:
-            mock_run.return_value = (0, '', '')
-            assert client.check_job_has_nodes('12345') is False
-
-    def test_returns_false_on_command_failure(self):
-        """Test returns False when squeue command fails."""
-        client = slurm.SlurmClient(
-            ssh_host='localhost',
-            ssh_port=22,
-            ssh_user='root',
-            ssh_key=None,
-        )
-
-        with mock.patch.object(client._runner, 'run') as mock_run:
-            mock_run.return_value = (1, '', 'error')
-            assert client.check_job_has_nodes('12345') is False
-
-
-class TestGetJobState:
-    """Test SlurmClient.get_job_state()."""
-
-    def test_get_job_state_with_only_job_state_flag(self):
-        """Test that get_job_state uses --only-job-state when supported."""
-        client = slurm.SlurmClient(
-            ssh_host='localhost',
-            ssh_port=22,
-            ssh_user='root',
-            ssh_key=None,
-        )
-
-        with mock.patch.object(client._runner, 'run') as mock_run:
-            mock_run.return_value = (0, 'RUNNING\n', '')
-            result = client.get_job_state('12345')
-            mock_run.assert_called_once_with(
-                'squeue -h --only-job-state --jobs 12345 -o "%T"',
-                require_outputs=True,
-                separate_stderr=True,
-                stream_logs=False,
-            )
-            assert result == 'RUNNING'
-
-    def test_get_job_state_falls_back_on_old_slurm(self):
-        """Test fallback when --only-job-state is not supported (Slurm < 21.08)."""
-        client = slurm.SlurmClient(
-            ssh_host='localhost',
-            ssh_port=22,
-            ssh_user='root',
-            ssh_key=None,
-        )
-
-        with mock.patch.object(client._runner, 'run') as mock_run:
-            mock_run.side_effect = [
-                (1, '', "squeue: unrecognized option '--only-job-state'"),
-                (0, 'PENDING\n', ''),
-            ]
-            result = client.get_job_state('12345')
-            assert mock_run.call_count == 2
-            mock_run.assert_called_with(
-                'squeue -h --jobs 12345 -o "%T"',
-                require_outputs=True,
-                separate_stderr=True,
-                stream_logs=False,
-            )
-            assert result == 'PENDING'
-
-    def test_get_job_state_returns_none_for_empty_output(self):
-        """Test returns None when job is not found."""
-        client = slurm.SlurmClient(
-            ssh_host='localhost',
-            ssh_port=22,
-            ssh_user='root',
-            ssh_key=None,
-        )
-
-        with mock.patch.object(client._runner, 'run') as mock_run:
-            mock_run.return_value = (0, '', '')
-            result = client.get_job_state('99999')
-            assert result is None
-
-
-class TestGetJobsStateByName:
-    """Test SlurmClient.get_jobs_state_by_name()."""
-
-    def test_get_jobs_state_by_name_single_running(self):
-        """Test parsing single RUNNING job state."""
-        client = slurm.SlurmClient(
-            ssh_host='localhost',
-            ssh_port=22,
-            ssh_user='root',
-            ssh_key=None,
-        )
-
-        mock_output = 'RUNNING\n'
-        with mock.patch.object(client._runner, 'run') as mock_run:
-            mock_run.return_value = (0, mock_output, '')
-
-            result = client.get_jobs_state_by_name('sky-3a5e-pilot-9b1gdacf')
-            mock_run.assert_called_once_with(
-                'squeue -h --name sky-3a5e-pilot-9b1gdacf -o "%T"',
-                require_outputs=True,
-                separate_stderr=True,
-                stream_logs=False,
-            )
-
-            assert result == ['RUNNING']
-
-    def test_get_jobs_state_by_name_multiple_jobs(self):
-        """Test parsing multiple jobs with different states."""
-        client = slurm.SlurmClient(
-            ssh_host='localhost',
-            ssh_port=22,
-            ssh_user='root',
-            ssh_key=None,
-        )
-
-        mock_output = 'RUNNING\nPENDING\nRUNNING\n'
-        with mock.patch.object(client._runner, 'run') as mock_run:
-            mock_run.return_value = (0, mock_output, '')
-
-            result = client.get_jobs_state_by_name('sky-test-job')
-            mock_run.assert_called_once_with(
-                'squeue -h --name sky-test-job -o "%T"',
-                require_outputs=True,
-                separate_stderr=True,
-                stream_logs=False,
-            )
-
-            assert result == ['RUNNING', 'PENDING', 'RUNNING']
-
-
 class TestSlurmClientInit:
     """Test SlurmClient.__init__()."""
 
@@ -505,3 +344,198 @@ class TestGetProctrackType:
             result = client.get_proctrack_type()
 
             assert result is None
+
+
+class TestQueryJobs:
+    """Test SlurmClient.query_jobs()."""
+
+    def test_multiple_jobs(self):
+        """Test parsing multiple jobs in different states."""
+        client = slurm.SlurmClient(
+            ssh_host='localhost',
+            ssh_port=22,
+            ssh_user='root',
+            ssh_key=None,
+        )
+
+        mock_output = ('100\x1fRUNNING\x1fNone\x1fnode[01-02]\n'
+                       '101\x1fPENDING\x1fResources\x1f\n'
+                       '102\x1fFAILED\x1fNonZeroExitCode\x1f\n')
+
+        with mock.patch.object(client._runner, 'run') as mock_run:
+            mock_run.return_value = (0, mock_output, '')
+            result = client.query_jobs(
+                'my-cluster',
+                ['running', 'pending', 'failed'],
+            )
+            mock_run.assert_called_once_with(
+                f'squeue --me -h -o "%i{slurm.SEP}%T{slurm.SEP}'
+                f'%r{slurm.SEP}%N"'
+                ' --states running,pending,failed'
+                ' --name my-cluster',
+                require_outputs=True,
+                separate_stderr=True,
+                stream_logs=False,
+            )
+
+            assert len(result) == 3
+
+            assert result[0].job_id == '100'
+            assert result[0].state == 'RUNNING'
+            assert result[0].reason is None
+            assert result[0].nodelist == 'node[01-02]'
+
+            assert result[1].job_id == '101'
+            assert result[1].state == 'PENDING'
+            assert result[1].reason == 'Resources'
+            assert result[1].nodelist is None
+
+            assert result[2].job_id == '102'
+            assert result[2].state == 'FAILED'
+            assert result[2].reason == 'NonZeroExitCode'
+            assert result[2].nodelist is None
+
+    def test_empty_result(self):
+        """Test empty output returns empty list."""
+        client = slurm.SlurmClient(
+            ssh_host='localhost',
+            ssh_port=22,
+            ssh_user='root',
+            ssh_key=None,
+        )
+
+        with mock.patch.object(client._runner, 'run') as mock_run:
+            mock_run.return_value = (0, '', '')
+            result = client.query_jobs('my-cluster')
+            assert result == []
+
+    def test_no_filters(self):
+        """Test calling without state filters or job name."""
+        client = slurm.SlurmClient(
+            ssh_host='localhost',
+            ssh_port=22,
+            ssh_user='root',
+            ssh_key=None,
+        )
+
+        with mock.patch.object(client._runner, 'run') as mock_run:
+            mock_run.return_value = (0, '100\x1fRUNNING\x1fNone\x1fnode1', '')
+            result = client.query_jobs()
+            mock_run.assert_called_once_with(
+                f'squeue --me -h -o "%i{slurm.SEP}%T{slurm.SEP}'
+                f'%r{slurm.SEP}%N"',
+                require_outputs=True,
+                separate_stderr=True,
+                stream_logs=False,
+            )
+            assert len(result) == 1
+            assert result[0].job_id == '100'
+
+
+class TestSlurmJobInfo:
+    """Test SlurmJobInfo SQLite-backed job cache."""
+
+    def _make_tracker(self, mock_results, tmp_path):
+        """Create a SlurmJobInfo with a mocked SlurmClient."""
+        client = mock.MagicMock()
+        client.query_jobs.return_value = mock_results
+        # Use a temp DB so tests don't conflict.
+        with mock.patch.object(slurm.SlurmJobInfo,
+                               '_get_db_path',
+                               return_value=str(tmp_path / 'test.db')):
+            tracker = slurm.SlurmJobInfo(client, 'my-cluster', poll_interval=10)
+        return tracker
+
+    def test_poll_and_read(self, tmp_path):
+        """Test poll() writes data and job_info() reads it."""
+        results = [
+            slurm.JobInfo('100', 'RUNNING', None, 'node01'),
+            slurm.JobInfo('101', 'PENDING', 'Priority', None),
+        ]
+        tracker = self._make_tracker(results, tmp_path)
+        tracker.poll()
+
+        info = tracker.job_info('100')
+        assert info is not None
+        assert info.state == 'RUNNING'
+        assert info.nodelist == 'node01'
+
+        info = tracker.job_info('101')
+        assert info is not None
+        assert info.state == 'PENDING'
+        assert info.reason == 'Priority'
+
+    def test_jobs_returns_ids(self, tmp_path):
+        """Test jobs() returns all job IDs for the cluster."""
+        results = [
+            slurm.JobInfo('100', 'RUNNING', None, 'node01'),
+            slurm.JobInfo('101', 'PENDING', 'Priority', None),
+        ]
+        tracker = self._make_tracker(results, tmp_path)
+        tracker.poll()
+
+        job_ids = tracker.jobs()
+        assert sorted(job_ids) == ['100', '101']
+
+    def test_job_info_returns_none_for_unknown(self, tmp_path):
+        """Test job_info() returns None for unknown job IDs."""
+        tracker = self._make_tracker([], tmp_path)
+        tracker.poll()
+        assert tracker.job_info('999') is None
+
+    def test_poll_replaces_stale_data(self, tmp_path):
+        """Test poll() replaces old data with fresh data."""
+        client = mock.MagicMock()
+        with mock.patch.object(slurm.SlurmJobInfo,
+                               '_get_db_path',
+                               return_value=str(tmp_path / 'test.db')):
+            tracker = slurm.SlurmJobInfo(client, 'my-cluster', poll_interval=0)
+
+        # First poll: job is PENDING
+        client.query_jobs.return_value = [
+            slurm.JobInfo('100', 'PENDING', 'Priority', None),
+        ]
+        tracker.poll()
+        assert tracker.job_info('100').state == 'PENDING'
+
+        # Second poll: job is now RUNNING with nodes
+        client.query_jobs.return_value = [
+            slurm.JobInfo('100', 'RUNNING', None, 'node01'),
+        ]
+        tracker.poll()
+        assert tracker.job_info('100').state == 'RUNNING'
+        assert tracker.job_info('100').nodelist == 'node01'
+
+    def test_poll_skips_when_fresh(self, tmp_path):
+        """Test poll() skips squeue when cache is fresh."""
+        results = [slurm.JobInfo('100', 'RUNNING', None, 'node01')]
+        tracker = self._make_tracker(results, tmp_path)
+        tracker.poll()  # First call — runs squeue.
+        tracker.poll()  # Second call — cache is fresh, skip.
+
+        # query_jobs should only be called once.
+        assert tracker._client.query_jobs.call_count == 1
+
+    def test_cluster_isolation(self, tmp_path):
+        """Test different clusters don't see each other's data."""
+        client = mock.MagicMock()
+        with mock.patch.object(slurm.SlurmJobInfo,
+                               '_get_db_path',
+                               return_value=str(tmp_path / 'test.db')):
+            tracker_a = slurm.SlurmJobInfo(client, 'cluster-a', poll_interval=0)
+            tracker_b = slurm.SlurmJobInfo(client, 'cluster-b', poll_interval=0)
+
+        client.query_jobs.return_value = [
+            slurm.JobInfo('100', 'RUNNING', None, 'node01'),
+        ]
+        tracker_a.poll()
+
+        client.query_jobs.return_value = [
+            slurm.JobInfo('200', 'PENDING', 'Priority', None),
+        ]
+        tracker_b.poll()
+
+        assert tracker_a.jobs() == ['100']
+        assert tracker_b.jobs() == ['200']
+        assert tracker_a.job_info('200') is None
+        assert tracker_b.job_info('100') is None

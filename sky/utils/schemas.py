@@ -1635,6 +1635,10 @@ def get_config_schema():
                 'provision_timeout': {
                     'type': 'integer',
                 },
+                'poll_interval': {
+                    'type': 'number',
+                    'minimum': 2,
+                },
                 'pricing': _PRICING_SCHEMA,
                 'sbatch_options': _SBATCH_OPTIONS_SCHEMA,
                 'cluster_configs': {
@@ -1651,6 +1655,10 @@ def get_config_schema():
                             },
                             'tmpdir': {
                                 'type': 'string',
+                            },
+                            'poll_interval': {
+                                'type': 'number',
+                                'minimum': 2,
                             },
                             'pricing': _PRICING_SCHEMA,
                             'sbatch_options': _SBATCH_OPTIONS_SCHEMA,

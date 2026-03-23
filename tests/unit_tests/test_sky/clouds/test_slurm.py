@@ -124,16 +124,21 @@ class TestTerminateInstances:
             ('SUSPENDED', True, True),
             ('STAGING_OUT', True, True),
         ])
-    @patch('sky.provision.slurm.instance.slurm_utils.is_inside_slurm_cluster')
-    @patch('sky.provision.slurm.instance.slurm.SlurmClient')
-    def test_terminate_instances_handles_job_states(
-            self, mock_slurm_client_class, mock_is_inside_slurm_cluster,
-            job_state, should_cancel, should_signal):
+    def test_terminate_instances_handles_job_states(self, tmp_path, job_state,
+                                                    should_cancel,
+                                                    should_signal):
         """Test terminate_instances handles different job states correctly."""
-        mock_is_inside_slurm_cluster.return_value = False
+        from sky.adaptors.slurm import JobInfo
+        from sky.adaptors.slurm import SlurmClient
+        from sky.adaptors.slurm import SlurmJobInfo
 
         mock_client = mock.MagicMock()
-        mock_slurm_client_class.return_value = mock_client
+        mock_client.job_tracker.side_effect = lambda name, **kw: (
+            SlurmClient.job_tracker(mock_client, name, **kw))
+        mock_client.query_jobs.return_value = [
+            JobInfo(job_id='12345', state=job_state, reason=None,
+                    nodelist=None),
+        ]
 
         cluster_name = 'test-cluster'
         provider_config = {
@@ -145,13 +150,16 @@ class TestTerminateInstances:
             }
         }
 
-        # Mock the job state query
-        mock_client.get_jobs_state_by_name.return_value = [job_state]
-
-        slurm_instance.terminate_instances(
-            cluster_name_on_cloud=cluster_name,
-            provider_config=provider_config,
-        )
+        with patch('sky.provision.slurm.instance.slurm.SlurmClient',
+                   return_value=mock_client), \
+             patch('sky.provision.slurm.instance.slurm_utils'
+                   '.is_inside_slurm_cluster', return_value=False), \
+             patch.object(SlurmJobInfo, '_get_db_path',
+                          return_value=str(tmp_path / 'test.db')):
+            slurm_instance.terminate_instances(
+                cluster_name_on_cloud=cluster_name,
+                provider_config=provider_config,
+            )
 
         if should_cancel:
             if should_signal:
@@ -168,15 +176,15 @@ class TestTerminateInstances:
         else:
             mock_client.cancel_jobs_by_name.assert_not_called()
 
-    @patch('sky.provision.slurm.instance.slurm_utils.is_inside_slurm_cluster')
-    @patch('sky.provision.slurm.instance.slurm.SlurmClient')
-    def test_terminate_instances_no_jobs_found(self, mock_slurm_client_class,
-                                               mock_is_inside_slurm_cluster):
+    def test_terminate_instances_no_jobs_found(self, tmp_path):
         """Test terminate_instances when no jobs are found."""
-        mock_is_inside_slurm_cluster.return_value = False
+        from sky.adaptors.slurm import SlurmClient
+        from sky.adaptors.slurm import SlurmJobInfo
 
         mock_client = mock.MagicMock()
-        mock_slurm_client_class.return_value = mock_client
+        mock_client.job_tracker.side_effect = lambda name, **kw: (
+            SlurmClient.job_tracker(mock_client, name, **kw))
+        mock_client.query_jobs.return_value = []
 
         cluster_name = 'test-cluster'
         provider_config = {
@@ -188,15 +196,17 @@ class TestTerminateInstances:
             }
         }
 
-        # No jobs found
-        mock_client.get_jobs_state_by_name.return_value = []
+        with patch('sky.provision.slurm.instance.slurm.SlurmClient',
+                   return_value=mock_client), \
+             patch('sky.provision.slurm.instance.slurm_utils'
+                   '.is_inside_slurm_cluster', return_value=False), \
+             patch.object(SlurmJobInfo, '_get_db_path',
+                          return_value=str(tmp_path / 'test.db')):
+            slurm_instance.terminate_instances(
+                cluster_name_on_cloud=cluster_name,
+                provider_config=provider_config,
+            )
 
-        slurm_instance.terminate_instances(
-            cluster_name_on_cloud=cluster_name,
-            provider_config=provider_config,
-        )
-
-        # Should return early without canceling
         mock_client.cancel_jobs_by_name.assert_not_called()
 
 
@@ -693,15 +703,28 @@ class TestSlurmProvisionTimeout:
         """Test provision_timeout matches expected value."""
         deploy_vars, mock_config = self._make_deploy_vars(zone, config_return)
         assert deploy_vars['provision_timeout'] == expected_timeout
-        mock_config.assert_called_once_with(cloud='slurm',
-                                            region='test-cluster',
-                                            keys=('provision_timeout',),
-                                            default_value=None)
+        mock_config.assert_any_call(cloud='slurm',
+                                    region='test-cluster',
+                                    keys=('provision_timeout',),
+                                    default_value=None)
+        # poll_interval is also read via get_effective_region_config
+        mock_config.assert_any_call(cloud='slurm',
+                                    region='test-cluster',
+                                    keys=('poll_interval',),
+                                    default_value=10)
 
 
 class TestProvisionTimeoutPassthrough:
     """Test that provision_timeout from provider_config is used in
     _create_virtual_instance."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_db_path(self, tmp_path):
+        """Use a temp DB for SlurmJobInfo in all tests."""
+        db_path = str(tmp_path / 'slurm_test.db')
+        with patch('sky.adaptors.slurm.SlurmJobInfo._get_db_path',
+                   return_value=db_path):
+            yield
 
     @patch('sky.provision.slurm.instance._wait_for_job_nodes')
     @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
@@ -767,8 +790,15 @@ class TestProvisionTimeoutPassthrough:
             config=config,
         )
 
-        mock_wait_for_job_nodes.assert_called_once_with(mock_client, mock.ANY,
-                                                        120, 'gpu', mock.ANY)
+        mock_wait_for_job_nodes.assert_called_once_with(
+            mock.ANY,
+            mock_client,
+            mock.ANY,
+            120,
+            'gpu',
+            mock.ANY,
+            poll_interval=10,
+        )
         # get_job_nodes should be called without wait params
         mock_client.get_job_nodes.assert_called_once_with(mock.ANY)
 
@@ -836,14 +866,102 @@ class TestProvisionTimeoutPassthrough:
         )
 
         # provision_timeout=120 should be passed to _wait_for_job_nodes
-        mock_wait_for_job_nodes.assert_called_once_with(mock_client, mock.ANY,
-                                                        120, 'gpu', mock.ANY)
+        mock_wait_for_job_nodes.assert_called_once_with(
+            mock.ANY,
+            mock_client,
+            mock.ANY,
+            120,
+            'gpu',
+            mock.ANY,
+            poll_interval=10,
+        )
         # get_job_nodes should be called without wait params
         mock_client.get_job_nodes.assert_called_once_with(mock.ANY)
+
+    @patch('sky.provision.slurm.instance._wait_for_job_nodes')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_partition_info')
+    @patch('sky.provision.slurm.instance.slurm.SlurmClient')
+    @patch('sky.provision.slurm.instance.command_runner.SSHCommandRunner')
+    def test_poll_interval_passthrough(self, mock_ssh_runner, mock_slurm_client,
+                                       mock_get_partition_info,
+                                       mock_get_proctrack_type,
+                                       mock_wait_for_job_nodes):
+        """When provider_config has poll_interval, it passes through."""
+        from sky.adaptors.slurm import SlurmPartition
+        from sky.provision import common
+
+        mock_get_partition_info.return_value = SlurmPartition(name='gpu',
+                                                              is_default=False,
+                                                              maxtime=7 * 24 *
+                                                              60 * 60)
+        mock_get_proctrack_type.return_value = 'cgroup'
+
+        mock_client = mock.MagicMock()
+        mock_client.query_jobs.return_value = []
+        mock_client.get_job_nodes.return_value = (['node1'], {
+            'node1': '10.0.0.5'
+        })
+        mock_slurm_client.return_value = mock_client
+
+        mock_runner = mock.MagicMock()
+        mock_runner.run.return_value = (0, '', '')
+        mock_runner.get_remote_home_dir.return_value = '/home/testuser'
+        mock_ssh_runner.return_value = mock_runner
+
+        config = common.ProvisionConfig(
+            provider_config={
+                'ssh': {
+                    'hostname': 'login.example.com',
+                    'port': '22',
+                    'user': 'testuser',
+                    'private_key': '/path/to/key',
+                },
+                'cluster': 'test-slurm',
+                'partition': 'gpu',
+                'provision_timeout': 120,
+                'poll_interval': 30,
+            },
+            authentication_config={},
+            docker_config={},
+            node_config={
+                'cpus': 2,
+                'memory': 8,
+            },
+            count=1,
+            tags={},
+            resume_stopped_nodes=False,
+            ports_to_open_on_launch=None,
+        )
+
+        slurm_instance._create_virtual_instance(
+            region='us-west-2',
+            cluster_name='test-poll-interval',
+            cluster_name_on_cloud='test-poll-interval',
+            config=config,
+        )
+
+        mock_wait_for_job_nodes.assert_called_once_with(
+            mock.ANY,
+            mock_client,
+            mock.ANY,
+            120,
+            'gpu',
+            mock.ANY,
+            poll_interval=30,
+        )
 
 
 class TestCreateVirtualInstance:
     """Test slurm_instance._create_virtual_instance() script generation."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_db_path(self, tmp_path):
+        """Use a temp DB for SlurmJobInfo in all tests."""
+        db_path = str(tmp_path / 'slurm_test.db')
+        with patch('sky.adaptors.slurm.SlurmJobInfo._get_db_path',
+                   return_value=db_path):
+            yield
 
     def _setup_mocks(self, mock_ssh_runner, mock_slurm_client,
                      mock_get_partition_info, partition_name):

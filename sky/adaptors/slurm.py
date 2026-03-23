@@ -2,11 +2,15 @@
 
 import ipaddress
 import logging
+import os
 import re
 import shlex
+import sqlite3
+import time
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from sky.adaptors import common
+from sky.skylet import runtime_utils
 from sky.utils import command_runner
 from sky.utils import subprocess_utils
 from sky.utils import timeline
@@ -32,6 +36,9 @@ hostlist = common.LazyImport('hostlist',
 
 _UNRESOLVED_HOSTNAME_MARKER = 'UNRESOLVED'
 
+# Default poll interval for SlurmJobInfo freshness checks (seconds).
+_DEFAULT_POLL_INTERVAL = 10
+
 
 class SlurmPartition(NamedTuple):
     """Information about the Slurm partitions."""
@@ -53,6 +60,14 @@ class NodeInfo(NamedTuple):
     # The default partition contains a '*' at the end of the name.
     # It is the caller's responsibility to strip the '*' if needed.
     partition: str
+
+
+class JobInfo(NamedTuple):
+    """Job information from squeue."""
+    job_id: str
+    state: Optional[str]  # e.g., 'RUNNING', 'PENDING', or None if not found
+    reason: Optional[str]  # e.g., 'Priority', 'Resources', or None
+    nodelist: Optional[str]  # e.g., 'node[01-03]', or None if no nodes
 
 
 def _parse_maxtime(line: str) -> Optional[int]:
@@ -140,38 +155,6 @@ class SlurmClient:
                                 require_outputs=True,
                                 separate_stderr=True,
                                 stream_logs=False)
-
-    def query_jobs(
-        self,
-        job_name: Optional[str] = None,
-        state_filters: Optional[List[str]] = None,
-    ) -> List[str]:
-        """Query Slurm jobs by state and optional name.
-
-        Args:
-            job_name: Optional job name to filter by.
-            state_filters: List of job states to filter by
-                (e.g., ['running', 'pending']). If None, returns all jobs.
-
-        Returns:
-            List of job IDs matching the filters.
-        """
-        cmd = 'squeue --me -h -o "%i"'
-        if state_filters is not None:
-            state_filters_str = ','.join(state_filters)
-            cmd += f' --states {state_filters_str}'
-        if job_name is not None:
-            cmd += f' --name {job_name}'
-
-        rc, stdout, stderr = self._run_slurm_cmd(cmd)
-        subprocess_utils.handle_returncode(rc,
-                                           cmd,
-                                           'Failed to query Slurm jobs.',
-                                           stderr=f'{stdout}\n{stderr}',
-                                           stream_logs=False)
-
-        job_ids = stdout.strip().splitlines()
-        return job_ids
 
     def cancel_jobs_by_name(self,
                             job_name: str,
@@ -287,23 +270,6 @@ class SlurmClient:
         node_info = _parse_scontrol_node_output(node_details)
         return node_info
 
-    def get_jobs_gres(self, node_name: str) -> List[str]:
-        """Get the list of jobs GRES for a given node name.
-
-        Returns:
-            A list of GRES specs (e.g., 'gres/gpu:h100:4')
-            for jobs on the node.
-        """
-        cmd = f'squeue -h --nodelist {node_name} -o "%b"'
-        rc, stdout, stderr = self._run_slurm_cmd(cmd)
-        subprocess_utils.handle_returncode(
-            rc,
-            cmd,
-            f'Failed to get jobs for node {node_name}.',
-            stderr=f'{stdout}\n{stderr}',
-            stream_logs=False)
-        return stdout.splitlines()
-
     def get_all_jobs_gres(self) -> Dict[str, List[str]]:
         """Get GRES allocation for all running jobs, grouped by node.
 
@@ -337,73 +303,6 @@ class SlurmClient:
 
         return nodes_to_gres
 
-    def get_job_state(self, job_id: str) -> Optional[str]:
-        """Get the state of a Slurm job.
-
-        Args:
-            job_id: The Slurm job ID.
-
-        Returns:
-            The job state (e.g., 'PENDING', 'RUNNING', 'COMPLETED', etc.),
-            or None if the job is not found.
-        """
-        # Use --only-job-state since we only need the job state.
-        # This reduces the work required by slurmctld.
-        # Fall back to the command without --only-job-state for older
-        # Slurm versions (< 21.08) that don't support this flag.
-        cmd = f'squeue -h --only-job-state --jobs {job_id} -o "%T"'
-        rc, stdout, stderr = self._run_slurm_cmd(cmd)
-        if rc != 0 and 'unrecognized option' in stderr:
-            cmd = f'squeue -h --jobs {job_id} -o "%T"'
-            rc, stdout, stderr = self._run_slurm_cmd(cmd)
-        subprocess_utils.handle_returncode(
-            rc,
-            cmd,
-            f'Failed to get job state for job {job_id}.',
-            stderr=f'{stdout}\n{stderr}',
-            stream_logs=False)
-
-        state = stdout.strip()
-        return state if state else None
-
-    def get_jobs_state_by_name(self, job_name: str) -> List[str]:
-        """Get the states of all Slurm jobs by name.
-        """
-        cmd = f'squeue -h --name {job_name} -o "%T"'
-        rc, stdout, stderr = self._run_slurm_cmd(cmd)
-        subprocess_utils.handle_returncode(
-            rc,
-            cmd,
-            f'Failed to get job state for job {job_name}.',
-            stderr=f'{stdout}\n{stderr}',
-            stream_logs=False)
-
-        states = stdout.splitlines()
-        return states
-
-    @timeline.event
-    def get_job_reason(self, job_id: str) -> Optional[str]:
-        """Get the reason a job is in its current state
-
-        Args:
-            job_id: The Slurm job ID.
-        """
-        # Without --states all, squeue omits terminated jobs.
-        cmd = f'squeue -h --jobs {job_id} --states all -o "%r"'
-        rc, stdout, stderr = self._run_slurm_cmd(cmd)
-        subprocess_utils.handle_returncode(
-            rc,
-            cmd,
-            f'Failed to get job reason for job {job_id}.',
-            stderr=f'{stdout}\n{stderr}',
-            stream_logs=False)
-
-        output = stdout.strip()
-        if not output:
-            return None
-
-        return output if output != 'None' else None
-
     def get_pending_job_count(self,
                               partition: str,
                               exclude_job_id: Optional[str] = None) -> int:
@@ -425,15 +324,74 @@ class SlurmClient:
             job_ids = [j for j in job_ids if j != exclude_job_id]
         return len(job_ids)
 
-    def check_job_has_nodes(self, job_id: str) -> bool:
-        """Check if a Slurm job has nodes allocated."""
-        cmd = f'squeue -h --jobs {job_id} -o "%N"'
+    def query_jobs(
+        self,
+        job_name: Optional[str] = None,
+        state_filters: Optional[List[str]] = None,
+    ) -> List[JobInfo]:
+        """Query jobs, returning state, reason, and nodelist per job.
+
+        A single squeue call that returns all requested job information.
+        Typically called via SlurmJobInfo.poll() rather than directly.
+
+        Args:
+            job_name: Optional job name to filter by (--name).
+            state_filters: List of job states to filter by
+                (e.g., ['all'] for all states). If None, uses squeue
+                defaults (active jobs only).
+
+        Returns:
+            List of JobInfo with job_id, state, reason, and nodelist.
+        """
+        cmd = f'squeue --me -h -o "%i{SEP}%T{SEP}%r{SEP}%N"'
+        if state_filters is not None:
+            state_filters_str = ','.join(state_filters)
+            cmd += f' --states {state_filters_str}'
+        if job_name is not None:
+            cmd += f' --name {job_name}'
+
         rc, stdout, stderr = self._run_slurm_cmd(cmd)
-        if rc != 0:
-            logger.debug(f'Failed to check nodes for job {job_id}: '
-                         f'{stdout}\n{stderr}')
-            return False
-        return bool(stdout.strip())
+        subprocess_utils.handle_returncode(rc,
+                                           cmd,
+                                           'Failed to query Slurm jobs.',
+                                           stderr=f'{stdout}\n{stderr}',
+                                           stream_logs=False)
+
+        results: List[JobInfo] = []
+        for line in stdout.splitlines():
+            # Split on \x1f before stripping, since strip() removes \x1f.
+            parts = line.split('\x1f')
+            if len(parts) != 4:
+                if line.strip():
+                    logger.debug(f'Unexpected squeue output line: {line!r}')
+                continue
+            parsed_id, state, reason, nodelist = parts
+            reason = reason.strip()
+            reason = reason if reason and reason != 'None' else None
+            nodelist = nodelist.strip() or None
+            results.append(
+                JobInfo(job_id=parsed_id.strip(),
+                        state=state.strip(),
+                        reason=reason,
+                        nodelist=nodelist))
+        return results
+
+    def job_tracker(
+        self,
+        cluster_name: str,
+        poll_interval: float = _DEFAULT_POLL_INTERVAL,
+    ) -> 'SlurmJobInfo':
+        """Get a SlurmJobInfo tracker for the given cluster.
+
+        Args:
+            cluster_name: The cluster name (used as squeue --name filter
+                and SQLite cache key).
+            poll_interval: Minimum seconds between squeue calls.
+
+        Returns:
+            A SlurmJobInfo instance backed by a shared SQLite cache.
+        """
+        return SlurmJobInfo(self, cluster_name, poll_interval)
 
     @timeline.event
     def get_job_nodes(self, job_id: str) -> Tuple[List[str], List[str]]:
@@ -745,3 +703,108 @@ class SlurmClient:
     def check_homedir_shared_fs(self) -> Optional[str]:
         """Check the filesystem type of the home directory."""
         return self.check_dir_shared_fs('~')
+
+
+# SQLite timeout for write lock contention (seconds).
+_DB_TIMEOUT_S = 60
+
+
+class SlurmJobInfo:
+    """SQLite-backed cache of Slurm job state.
+
+    Provides a single-poll, multi-read interface for squeue data.
+    The SQLite DB is file-backed and shared across API server worker
+    processes, so only one process needs to call squeue per poll
+    interval.
+
+    Usage:
+        tracker = SlurmJobInfo(client, 'my-cluster', poll_interval=10)
+        tracker.poll()            # Runs squeue if cache is stale
+        info = tracker.job_info('12345')  # Read from cache
+        ids = tracker.jobs()              # All cached job IDs
+    """
+
+    @classmethod
+    def _get_db_path(cls) -> str:
+        return runtime_utils.get_runtime_dir_path('.sky/slurm_job_cache.db')
+
+    def __init__(self,
+                 client: 'SlurmClient',
+                 cluster_name: str,
+                 poll_interval: float = _DEFAULT_POLL_INTERVAL):
+        self._client = client
+        self._cluster_name = cluster_name
+        self._poll_interval = poll_interval
+        self._conn = self._init_db()
+
+    def _init_db(self) -> sqlite3.Connection:
+        db_path = self._get_db_path()
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        conn = sqlite3.connect(db_path, timeout=_DB_TIMEOUT_S)
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS slurm_jobs (
+                cluster_name TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                state TEXT,
+                reason TEXT,
+                nodelist TEXT,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (cluster_name, job_id)
+            )
+        """)
+        conn.commit()
+        return conn
+
+    def poll(self) -> None:
+        """Refresh job state from squeue if the cache is stale.
+
+        Checks the most recent updated_at for this cluster. If the
+        data is younger than poll_interval, the squeue call is skipped
+        (cross-process deduplication).
+        """
+        row = self._conn.execute(
+            'SELECT MAX(updated_at) FROM slurm_jobs '
+            'WHERE cluster_name = ?',
+            (self._cluster_name,),
+        ).fetchone()
+        if row[0] is not None and time.time() - row[0] < self._poll_interval:
+            return  # Cache is fresh.
+
+        results = self._client.query_jobs(job_name=self._cluster_name,
+                                          state_filters=['all'])
+        now = time.time()
+        self._conn.execute(
+            'DELETE FROM slurm_jobs WHERE cluster_name = ?',
+            (self._cluster_name,),
+        )
+        self._conn.executemany(
+            'INSERT INTO slurm_jobs '
+            '(cluster_name, job_id, state, reason, nodelist, updated_at) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            [(self._cluster_name, j.job_id, j.state, j.reason, j.nodelist, now)
+             for j in results],
+        )
+        self._conn.commit()
+
+    def job_info(self, job_id: str) -> Optional[JobInfo]:
+        """Get cached info for a specific job."""
+        row = self._conn.execute(
+            'SELECT job_id, state, reason, nodelist FROM slurm_jobs '
+            'WHERE cluster_name = ? AND job_id = ?',
+            (self._cluster_name, job_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return JobInfo(job_id=row[0],
+                       state=row[1],
+                       reason=row[2],
+                       nodelist=row[3])
+
+    def jobs(self) -> List[str]:
+        """Return all cached job IDs for this cluster."""
+        rows = self._conn.execute(
+            'SELECT job_id FROM slurm_jobs WHERE cluster_name = ?',
+            (self._cluster_name,),
+        ).fetchall()
+        return [r[0] for r in rows]

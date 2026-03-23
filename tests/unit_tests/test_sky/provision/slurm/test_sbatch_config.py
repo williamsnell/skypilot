@@ -259,3 +259,24 @@ class TestSbatchConfigSchema:
                     }
                 }
             })
+
+    def test_valid_poll_interval_global(self):
+        self._validate({'slurm': {'poll_interval': 10}})
+
+    def test_valid_poll_interval_cluster(self):
+        self._validate({
+            'slurm': {
+                'cluster_configs': {
+                    'mycluster': {
+                        'poll_interval': 30,
+                    }
+                }
+            }
+        })
+
+    def test_invalid_poll_interval_too_low(self):
+        with pytest.raises(jsonschema.ValidationError):
+            self._validate({'slurm': {'poll_interval': 1}})
+
+    def test_valid_poll_interval_minimum(self):
+        self._validate({'slurm': {'poll_interval': 2}})
