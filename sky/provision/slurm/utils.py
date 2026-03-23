@@ -246,6 +246,9 @@ def _check_cluster_feature(
         ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),
         identities_only=get_identities_only(ssh_config_dict),
         ssh_certificate_file=get_certificate_file(ssh_config_dict),
+        # Feature checks are background probes that should fail fast,
+        # not wait for interactive authentication.
+        enable_interactive_auth=False,
     )
     enabled = check_fn(client)
 

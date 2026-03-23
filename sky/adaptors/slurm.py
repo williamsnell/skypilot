@@ -105,6 +105,7 @@ class SlurmClient:
         is_inside_slurm_cluster: bool = False,
         identities_only: Optional[bool] = None,
         ssh_certificate_file: Optional[str] = None,
+        enable_interactive_auth: bool = True,
     ):
         """Initialize SlurmClient.
 
@@ -122,6 +123,9 @@ class SlurmClient:
                 ssh-agent fallback for backward compatibility).
             ssh_certificate_file: Optional path to an SSH certificate file
                 for clusters requiring signed certificate authentication.
+            enable_interactive_auth: If True, retry failed SSH connections
+                with interactive authentication. Set to False for background
+                probes that should fail fast.
         """
         self.ssh_host = ssh_host
         self.ssh_port = ssh_port
@@ -149,7 +153,7 @@ class SlurmClient:
                 ssh_key,
                 ssh_proxy_command=ssh_proxy_command,
                 ssh_proxy_jump=ssh_proxy_jump,
-                enable_interactive_auth=True,
+                enable_interactive_auth=enable_interactive_auth,
                 disable_identities_only=not identities_only,
                 ssh_certificate_file=ssh_certificate_file,
             )
