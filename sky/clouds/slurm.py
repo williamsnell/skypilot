@@ -544,8 +544,11 @@ class Slurm(clouds.Cloud):
                 (constants.SKY_CLUSTER_NAME_ENV_VAR_KEY),
             'image_id': image_id,
             'sbatch_options': sbatch_options,
-            'container_runtime': slurm_utils.resolve_container_runtime(
-                ssh_config_dict, cluster),
+            # Only resolve the container runtime when an image is
+            # requested, to avoid unnecessary SSH probes during
+            # auto-detection.
+            'container_runtime': (slurm_utils.resolve_container_runtime(
+                ssh_config_dict, cluster) if image_id is not None else None),
         }
 
         return deploy_vars
