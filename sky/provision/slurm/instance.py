@@ -559,14 +559,18 @@ def _create_virtual_instance(
         # For containers, ~ is /root which is isolated inside the container,
         # so modifying bashrc doesn't affect non-containerized sessions.
         if container_runtime == 'podman-hpc':
-            # Podman-HPC containers are ephemeral — packages installed
-            # here are lost when the container exits. The image must
-            # already contain the required packages (rsync, curl, git).
+            # Podman-HPC uses a persistent named container, so
+            # packages installed here are retained for exec calls.
+            # Allow apt-get update to fail partially — some HTTPS
+            # repos may be unreachable on HPC networks.
             container_init_script = """\
 set -e
 echo "[container-init] Starting..."
+INIT_START=$SECONDS
+apt-get update || echo "[container-init] WARNING: apt-get update had errors (continuing)"
+apt-get install -y ca-certificates rsync curl git wget fuse
 echo 'alias sudo=""' >> ~/.bashrc
-echo "[container-init] Ready"
+echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
 """
         else:
             # Pyxis containers persist via :create/:exec, so packages
