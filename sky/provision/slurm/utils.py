@@ -80,6 +80,11 @@ def pyxis_container_name(cluster_name_on_cloud: str) -> str:
     return cluster_name_on_cloud
 
 
+def podman_hpc_container_name(cluster_name_on_cloud: str) -> str:
+    """Get the podman-hpc container name for --name / exec."""
+    return f'sky-{cluster_name_on_cloud}'
+
+
 # SSH host key filename for sshd.
 SLURM_SSHD_HOST_KEY_FILENAME = 'skypilot_host_key'
 

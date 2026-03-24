@@ -1903,8 +1903,9 @@ class SlurmCommandRunner(SSHCommandRunner):
 job_id=$(echo "$1" | cut -d+ -f1)
 node_list=$(echo "$1" | cut -d+ -f2)
 shift
-exec {ssh_command} srun --unbuffered --quiet --overlap {extra_srun_args}\\
-    --jobid="$job_id" --nodelist="$node_list" --nodes=1 --ntasks=1 "$@"
+exec {ssh_command} srun --unbuffered --quiet --overlap \\
+    --jobid="$job_id" --nodelist="$node_list" --nodes=1 --ntasks=1 \\
+    {extra_srun_args}"$@"
 """
         encoded_info = f'{self.job_id}+{self.slurm_node}'
         with tempfile.NamedTemporaryFile(mode='w', suffix='.sh',

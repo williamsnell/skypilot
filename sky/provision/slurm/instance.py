@@ -592,9 +592,11 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
             f'touch {container_init_done_dir}/$SLURM_PROCID && sleep infinity')
 
         if container_runtime == 'podman-hpc':
-            # Podman-HPC: pull and migrate image, then run ephemeral
-            # containers. Each srun invocation creates a fresh container
-            # from the locally cached image.
+            # Podman-HPC: pull and migrate image, then start a
+            # persistent named container. Subsequent commands use
+            # 'podman-hpc exec' to run inside it.
+            podman_container_name = slurm_utils.podman_hpc_container_name(
+                cluster_name_on_cloud)
             podman_mount_args = ' '.join(f'-v {m}' for m in mount_paths)
             # Login to private registry if credentials are provided.
             docker_login_config = provider_config.get('docker_login_config')
@@ -625,8 +627,9 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'srun --overlap '
                 f'{"--label " if num_nodes > 1 else ""}--unbuffered '
                 f'--nodes={num_nodes} --ntasks-per-node=1 '
-                f'podman-hpc run --rm --gpu '
-                f'--env-host '
+                f'podman-hpc run --gpu --env-host '
+                f'--name {shlex.quote(podman_container_name)} '
+                f'--replace '
                 f'{podman_mount_args} '
                 f'{shlex.quote(container_image)} '
                 f'bash -c {container_cmd} &\n'
@@ -735,6 +738,8 @@ cleanup() {{
     # When container_scope=job, named containers are removed automatically
     # at the end of the Slurm job, see: https://github.com/NVIDIA/pyxis/wiki/Setup#slurm-epilog
     srun --nodes={num_nodes} --ntasks-per-node=1 enroot remove -f {shlex.quote(_enroot_container_name_global_scope(cluster_name_on_cloud))} 2>/dev/null || true
+    # Remove podman-hpc container, if it exists.
+    srun --nodes={num_nodes} --ntasks-per-node=1 podman-hpc rm -f {shlex.quote(slurm_utils.podman_hpc_container_name(cluster_name_on_cloud))} 2>/dev/null || true
     # Clean up sky runtime directory on each node.
     # NOTE: We can do this because --nodes for both this srun and the
     # sbatch is the same number. Otherwise, there are no guarantees
@@ -1160,23 +1165,16 @@ def _build_pyxis_args(cluster_name_on_cloud: str) -> str:
     return f'--container-remap-root --container-name={quoted_name}:exec'
 
 
-def _build_podman_hpc_args(container_image: str, sky_cluster_home_dir: str,
-                           remote_home_dir: str) -> str:
-    """Build podman-hpc container args for srun.
+def _build_podman_hpc_args(cluster_name_on_cloud: str) -> str:
+    """Build podman-hpc exec args for srun.
 
-    Unlike Pyxis, podman-hpc containers are ephemeral — each srun invocation
-    starts a fresh container from the locally cached image. The returned
-    string is a command prefix placed between srun flags and bash -c.
+    Uses 'podman-hpc exec' to run commands inside the persistent
+    container started during provisioning (with sleep infinity).
+    This mirrors Pyxis's :exec pattern.
     """
-    mount_paths = [
-        f'{remote_home_dir}:{remote_home_dir}',
-    ]
-    # Mount the sky cluster home dir if it differs from remote home.
-    if not sky_cluster_home_dir.startswith(remote_home_dir):
-        mount_paths.append(f'{sky_cluster_home_dir}:{sky_cluster_home_dir}')
-    mount_args = ' '.join(f'-v {m}' for m in mount_paths)
-    return (f'podman-hpc run --rm --gpu --env-host '
-            f'{mount_args} {shlex.quote(container_image)}')
+    container_name = slurm_utils.podman_hpc_container_name(
+        cluster_name_on_cloud)
+    return f'podman-hpc exec {shlex.quote(container_name)}'
 
 
 def get_command_runners(
@@ -1271,12 +1269,7 @@ def get_command_runners(
     if has_container:
         container_runtime = provider_config.get('container_runtime', None)
         if container_runtime == 'podman-hpc':
-            # Read the container image from the marker file (written
-            # during provisioning).
-            image_name = client.read_file(container_marker)
-            container_args = _build_podman_hpc_args(image_name,
-                                                    sky_cluster_home_dir,
-                                                    remote_home_dir)
+            container_args = _build_podman_hpc_args(cluster_name_on_cloud)
         else:
             container_args = _build_pyxis_args(cluster_name_on_cloud)
 

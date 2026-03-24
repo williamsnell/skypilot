@@ -26,6 +26,8 @@ cleanup() {
     # When container_scope=job, named containers are removed automatically
     # at the end of the Slurm job, see: https://github.com/NVIDIA/pyxis/wiki/Setup#slurm-epilog
     srun --nodes=1 --ntasks-per-node=1 enroot remove -f pyxis_test-cluster 2>/dev/null || true
+    # Remove podman-hpc container, if it exists.
+    srun --nodes=1 --ntasks-per-node=1 podman-hpc rm -f sky-test-cluster 2>/dev/null || true
     # Clean up sky runtime directory on each node.
     # NOTE: We can do this because --nodes for both this srun and the
     # sbatch is the same number. Otherwise, there are no guarantees
