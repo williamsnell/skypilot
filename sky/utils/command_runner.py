@@ -1955,11 +1955,15 @@ exec {ssh_command} srun --unbuffered --quiet --overlap \\
         # For podman-hpc (rsync_to_host_only), the container mounts
         # the host home dir, so we use the same HOME/paths as the
         # host to keep file locations consistent.
+        venv_activate = (f'{self.skypilot_runtime_dir}/'
+                         f'skypilot-runtime/bin/activate')
         home_and_env = (f'export {constants.SKY_RUNTIME_DIR_ENV_VAR_KEY}='
                         f'"{self.skypilot_runtime_dir}" && '
                         f'export TMPDIR=/tmp && '
                         f'{self._ENV_SETUP} && '
-                        f'cd {self.sky_dir} && export HOME="$PWD"')
+                        f'cd {self.sky_dir} && export HOME="$PWD" && '
+                        f'{{ [ -f {venv_activate} ] && '
+                        f'source {venv_activate}; true; }}')
         if in_container:
             assert self.container_args is not None, (
                 '_run_via_srun with in_container=True called but '
