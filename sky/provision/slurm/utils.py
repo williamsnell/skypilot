@@ -1167,7 +1167,7 @@ def srun_sshd_command(
         ]
         if container_runtime == 'podman-hpc':
             container_name = podman_hpc_container_name(cluster_name_on_cloud)
-            srun_base += ['podman-hpc', 'exec', container_name]
+            srun_base += ['podman-hpc', 'exec', '-i', container_name]
         else:
             # pyxis/enroot
             srun_base += [
