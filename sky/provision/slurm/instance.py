@@ -708,6 +708,26 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'$((SECONDS - CONTAINER_START))s"\n'
                 f'touch {container_marker_file} {ready_signal}')
 
+    # Read the SkyPilot public key so we can write it to authorized_keys
+    # on the compute node. This is needed for SSH proxy (Dropbear) auth.
+    skypilot_private_key = config.authentication_config.get('ssh_private_key')
+    authorized_keys_block = ''
+    if skypilot_private_key:
+        pub_key_path = f'{skypilot_private_key}.pub'
+        try:
+            with open(os.path.expanduser(pub_key_path), 'r',
+                      encoding='utf-8') as f:
+                skypilot_public_key = f.read().strip()
+            authorized_keys_block = (
+                f'mkdir -p ~{ssh_user}/.ssh && '
+                f'echo {shlex.quote(skypilot_public_key)} '
+                f'>> ~{ssh_user}/.ssh/authorized_keys && '
+                f'chmod 700 ~{ssh_user}/.ssh && '
+                f'chmod 600 ~{ssh_user}/.ssh/authorized_keys')
+        except FileNotFoundError:
+            logger.warning(f'SkyPilot public key not found at {pub_key_path}.'
+                           ' SSH proxy may not work.')
+
     # By default stdout and stderr will be written to $HOME/slurm-%j.out
     # (because we invoke sbatch from $HOME). Redirect elsewhere to not pollute
     # the home directory.
@@ -763,6 +783,8 @@ trap 'exit 0' TERM
 mkdir -p {sky_cluster_home_dir}/sky_logs {sky_cluster_home_dir}/sky_workdir {sky_cluster_home_dir}/.sky
 # Create sky runtime directory on each node.
 srun --nodes={num_nodes} mkdir -p {skypilot_runtime_dir}
+# Set up authorized_keys for SSH proxy (Dropbear) authentication.
+{authorized_keys_block}
 # Marker file to indicate we're in a Slurm cluster.
 touch {slurm_marker_file}
 # Store proctrack type for task executor to read.
@@ -786,7 +808,8 @@ touch {sky_cluster_home_dir}/.hushlogin
         'Failed to create provision scripts directory on login node.',
         stderr=f'{stdout}\n{stderr}')
     # Rsync the provision script to the login node
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=True) as f:
+    with tempfile.NamedTemporaryFile(  # type: ignore[assignment]
+            mode='w', suffix='.sh', delete=True) as f:
         f.write(provision_script)
         f.flush()
         src_path = f.name

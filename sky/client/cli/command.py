@@ -243,6 +243,17 @@ def _get_cluster_records_and_set_ssh_config(
                              f'{handle.cluster_name} '
                              f'slurm-job-ssh-proxy %w')
             credentials['ssh_proxy_command'] = proxy_command
+            # For podman-hpc, the container runs as root (fakeroot)
+            # but the template sets ssh_user to the host user for
+            # file ownership/rsync. The host user doesn't exist in
+            # the container's /etc/passwd, so Dropbear needs root.
+            # (Pyxis already uses root via the template.)
+            container_runtime = (handle.cached_cluster_info.provider_config.get(
+                'container_runtime') if handle.cached_cluster_info and
+                                 handle.cached_cluster_info.provider_config else
+                                 None)
+            if container_runtime == 'podman-hpc':
+                credentials['ssh_user'] = 'root'
 
         cluster_utils.SSHConfigHelper.add_cluster(
             handle.cluster_name,
