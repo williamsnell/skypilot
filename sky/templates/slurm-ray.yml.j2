@@ -1,4 +1,4 @@
-{% set user = ssh_user if image_id is none else 'root' %}
+{% set user = ssh_user if (image_id is none or container_runtime == 'podman-hpc') else 'root' %}
 {% set has_image = image_id is not none %}
 cluster_name: {{cluster_name_on_cloud}}
 
