@@ -532,12 +532,6 @@ class SSHConfigHelper:
 
         proxy_command = auth_config.get('ssh_proxy_command', None)
         certificate_file = auth_config.get('ssh_certificate_file', None)
-        # For Slurm, the provider's SSH key (for login node auth) may
-        # differ from the SkyPilot key used internally.
-        identity_override = auth_config.get('ssh_config_identity_override',
-                                            None)
-        if identity_override is not None:
-            key_path_for_config = identity_override
 
         docker_proxy_command_generator = None
         proxy_command_for_nodes = proxy_command

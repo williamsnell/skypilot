@@ -1594,13 +1594,10 @@ def ssh_credential_from_yaml(
                     proxy_jump,
                     ssh_private_key=provider_key,
                     ssh_certificate_file=cert_file))
-        if cert_file:
-            credentials['ssh_certificate_file'] = cert_file
-        if provider_key:
-            # Use the provider's key for the SSH config IdentityFile
-            # (needed to authenticate to the login node), instead of
-            # the SkyPilot-generated key (used for internal operations).
-            credentials['ssh_config_identity_override'] = provider_key
+        # Note: we do NOT override IdentityFile here. The ProxyCommand
+        # already embeds the provider's key and certificate for login
+        # node auth. The IdentityFile stays as the SkyPilot key, which
+        # is what Dropbear's authorized_keys expects for the final hop.
     return credentials
 
 
