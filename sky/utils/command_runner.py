@@ -1824,6 +1824,7 @@ class SlurmCommandRunner(SSHCommandRunner):
         job_id: str,
         slurm_node: str,
         container_args: Optional[str],
+        rsync_to_host_only: bool = False,
         **kwargs,
     ):
         """Initialize SlurmCommandRunner.
@@ -1861,6 +1862,7 @@ class SlurmCommandRunner(SSHCommandRunner):
         self.job_id = job_id
         self.slurm_node = slurm_node
         self.container_args = container_args
+        self.rsync_to_host_only = rsync_to_host_only
 
     def _rsync_via_srun(
         self,
@@ -1981,8 +1983,12 @@ exec {ssh_command} srun --unbuffered --quiet --overlap \\
         stream_logs: bool = True,
         max_retry: int = 1,
     ) -> None:
-        # Default: run in container if container_args set, otherwise on host
-        in_container = self.container_args is not None
+        # For podman-hpc, rsync always targets the host filesystem
+        # since the home dir is mounted into the container.
+        if self.rsync_to_host_only:
+            in_container = False
+        else:
+            in_container = self.container_args is not None
         self._rsync_via_srun(source=source,
                              target=target,
                              up=up,
@@ -2053,6 +2059,8 @@ exec {ssh_command} srun --unbuffered --quiet --overlap \\
         max_retry: int = 1,
     ) -> None:
         # Both host and container: ensure environment is consistent.
+        # For podman-hpc, skip the container rsync since the home dir
+        # is mounted — files on the host are visible in the container.
         self._rsync_via_srun(source=source,
                              target=target,
                              up=up,
@@ -2060,7 +2068,7 @@ exec {ssh_command} srun --unbuffered --quiet --overlap \\
                              log_path=log_path,
                              stream_logs=stream_logs,
                              max_retry=max_retry)
-        if self.container_args is not None:
+        if self.container_args is not None and not self.rsync_to_host_only:
             self._rsync_via_srun(source=source,
                                  target=target,
                                  up=up,

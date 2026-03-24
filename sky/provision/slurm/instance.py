@@ -1293,6 +1293,9 @@ def get_command_runners(
             ssh_proxy_command=login_node_ssh_proxy_command,
             ssh_control_name=ssh_control_name,
             container_args=container_args,
+            # For podman-hpc, rsync to host only since the home dir
+            # is mounted into the container.
+            rsync_to_host_only=(container_runtime == 'podman-hpc'),
             enable_interactive_auth=True,
             # Allow ssh-agent and default key fallback for Slurm.
             disable_identities_only=True,
