@@ -1178,7 +1178,9 @@ def _build_podman_hpc_args(cluster_name_on_cloud: str) -> str:
     """
     container_name = slurm_utils.podman_hpc_container_name(
         cluster_name_on_cloud)
-    return f'podman-hpc exec {shlex.quote(container_name)}'
+    return (f'podman-hpc exec '
+            f'--env TMPDIR=/tmp '
+            f'{shlex.quote(container_name)}')
 
 
 def get_command_runners(

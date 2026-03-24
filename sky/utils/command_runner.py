@@ -1951,18 +1951,29 @@ exec {ssh_command} srun --unbuffered --quiet --overlap \\
             cmd = ' '.join(cmd)
 
         # Build inner command with environment setup.
+        # Set HOME to sky_dir and TMPDIR to /tmp for all paths.
+        # For podman-hpc (rsync_to_host_only), the container mounts
+        # the host home dir, so we use the same HOME/paths as the
+        # host to keep file locations consistent.
+        home_and_env = (f'export {constants.SKY_RUNTIME_DIR_ENV_VAR_KEY}='
+                        f'"{self.skypilot_runtime_dir}" && '
+                        f'export TMPDIR=/tmp && '
+                        f'{self._ENV_SETUP} && '
+                        f'cd {self.sky_dir} && export HOME="$PWD"')
         if in_container:
             assert self.container_args is not None, (
                 '_run_via_srun with in_container=True called but '
                 'container_args not set')
-            inner_cmd = f'{self._ENV_SETUP} && {cmd}'
+            if self.rsync_to_host_only:
+                # Podman-HPC: use same HOME/paths as host since
+                # the host filesystem is mounted in the container.
+                inner_cmd = f'{home_and_env} && {cmd}'
+            else:
+                # Pyxis: container has its own filesystem.
+                inner_cmd = f'{self._ENV_SETUP} && {cmd}'
             extra_srun_args = f'{self.container_args} '
         else:
-            inner_cmd = (f'export {constants.SKY_RUNTIME_DIR_ENV_VAR_KEY}='
-                         f'"{self.skypilot_runtime_dir}" && '
-                         f'{self._ENV_SETUP} && '
-                         f'cd {self.sky_dir} && export HOME="$PWD" && '
-                         f'{cmd}')
+            inner_cmd = f'{home_and_env} && {cmd}'
             extra_srun_args = ''
 
         srun_cmd = (
