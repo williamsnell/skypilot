@@ -113,7 +113,7 @@ ALIAS_SUDO_TO_EMPTY_FOR_ROOT_CMD = (
     '{ [ "$(whoami)" == "root" ] && function sudo() { "$@"; } || true; }')
 
 
-def _proxyjump_to_proxycommand(
+def proxyjump_to_proxycommand(
         proxy_jump: str,
         ssh_log_file: Optional[str] = None,
         ssh_private_key: Optional[str] = None,
@@ -311,7 +311,7 @@ def ssh_options_list(
         # OpenSSH does not pass the log file to the derived ProxyCommand and
         # we could only log it to stderr (with -v), which can be noisy.
         # See: https://github.com/openssh/openssh-portable/blob/a6f8f793d427a831be1b350741faa4f34066d55f/ssh.c#L1355-L1382 # pylint: disable=line-too-long
-        derived_proxy_command = _proxyjump_to_proxycommand(
+        derived_proxy_command = proxyjump_to_proxycommand(
             ssh_proxy_jump, ssh_log_file, ssh_private_key, ssh_certificate_file)
         logger.debug(f'--- ProxyJump: {ssh_proxy_jump} -> '
                      f'ProxyCommand: {derived_proxy_command} ---')

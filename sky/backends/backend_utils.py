@@ -1580,6 +1580,27 @@ def ssh_credential_from_yaml(
     # If we are running ssh command on kubernetes node.
     if 'kubernetes' in ssh_provider_module:
         credentials['disable_control_master'] = True
+    # For Slurm, the SSH config needs the provider's SSH parameters
+    # (ProxyJump, CertificateFile, private key) to connect to the login
+    # node. These are separate from the SkyPilot auth key used internally.
+    if 'slurm' in ssh_provider_module:
+        provider_ssh = config.get('provider', {}).get('ssh', {})
+        cert_file = provider_ssh.get('certificate_file')
+        proxy_jump = provider_ssh.get('proxyjump')
+        provider_key = provider_ssh.get('private_key')
+        if proxy_jump and ssh_proxy_command is None:
+            credentials['ssh_proxy_command'] = (
+                command_runner.proxyjump_to_proxycommand(
+                    proxy_jump,
+                    ssh_private_key=provider_key,
+                    ssh_certificate_file=cert_file))
+        if cert_file:
+            credentials['ssh_certificate_file'] = cert_file
+        if provider_key:
+            # Use the provider's key for the SSH config IdentityFile
+            # (needed to authenticate to the login node), instead of
+            # the SkyPilot-generated key (used for internal operations).
+            credentials['ssh_config_identity_override'] = provider_key
     return credentials
 
 

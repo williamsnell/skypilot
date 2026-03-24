@@ -23,6 +23,14 @@ ALIAS_SUDO_TO_EMPTY_FOR_ROOT_CMD: str
 DEFAULT_SSH_CONTROL_NAME: str
 
 
+def proxyjump_to_proxycommand(
+    proxy_jump: str,
+    ssh_log_file: Optional[str] = ...,
+    ssh_private_key: Optional[str] = ...,
+    ssh_certificate_file: Optional[str] = ...,
+) -> str: ...
+
+
 def ssh_options_list(
     ssh_private_key: Optional[str],
     ssh_control_name: Optional[str],

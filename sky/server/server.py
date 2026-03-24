@@ -2714,6 +2714,8 @@ async def slurm_job_ssh_proxy(websocket: fastapi.WebSocket,
     login_node_key = login_node_ssh_config.get('private_key', None)
     login_node_proxy_command = login_node_ssh_config.get('proxycommand', None)
     login_node_proxy_jump = login_node_ssh_config.get('proxyjump', None)
+    login_node_certificate_file = login_node_ssh_config.get(
+        'certificate_file', None)
 
     login_node_runner = command_runner.SSHCommandRunner(
         (login_node_host, login_node_port),
@@ -2721,6 +2723,7 @@ async def slurm_job_ssh_proxy(websocket: fastapi.WebSocket,
         login_node_key,
         ssh_proxy_command=login_node_proxy_command,
         ssh_proxy_jump=login_node_proxy_jump,
+        ssh_certificate_file=login_node_certificate_file,
     )
 
     ssh_cmd = login_node_runner.ssh_base_command(
@@ -2745,6 +2748,7 @@ async def slurm_job_ssh_proxy(websocket: fastapi.WebSocket,
 
     # Run sshd inside the Slurm job "container" via srun, such that it inherits
     # the resource constraints of the Slurm job.
+    container_runtime = provider_config.get('container_runtime', None)
     is_container_image = handle.launched_resources.extract_docker_image(
     ) is not None
     ssh_cmd += [
@@ -2755,6 +2759,7 @@ async def slurm_job_ssh_proxy(websocket: fastapi.WebSocket,
                 login_node_user,
                 handle.cluster_name_on_cloud,
                 is_container_image,
+                container_runtime=container_runtime,
             ))
     ]
 

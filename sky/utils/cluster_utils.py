@@ -183,11 +183,17 @@ class SSHConfigHelper:
     _windows_ssh_setup_warned = False
 
     @classmethod
-    def _get_generated_config(cls, autogen_comment: str,
-                              cluster_name_on_cloud: str, host_name: str,
-                              ip: str, username: str, ssh_key_path: str,
-                              proxy_command: Optional[str], port: int,
-                              docker_proxy_command: Optional[str]):
+    def _get_generated_config(cls,
+                              autogen_comment: str,
+                              cluster_name_on_cloud: str,
+                              host_name: str,
+                              ip: str,
+                              username: str,
+                              ssh_key_path: str,
+                              proxy_command: Optional[str],
+                              port: int,
+                              docker_proxy_command: Optional[str],
+                              certificate_file: Optional[str] = None):
         if proxy_command is not None:
             # Already checked in resources
             assert docker_proxy_command is None, (
@@ -225,6 +231,8 @@ class SSHConfigHelper:
             """).rstrip()
         if setenv_line:
             codegen += '\n' + setenv_line
+        if certificate_file:
+            codegen += '\n' + f'  CertificateFile {certificate_file}'
         if proxy:
             codegen += '\n' + f'  {proxy}'
         codegen = codegen + '\n'
@@ -523,6 +531,13 @@ class SSHConfigHelper:
                 f.write('\n' * 2)
 
         proxy_command = auth_config.get('ssh_proxy_command', None)
+        certificate_file = auth_config.get('ssh_certificate_file', None)
+        # For Slurm, the provider's SSH key (for login node auth) may
+        # differ from the SkyPilot key used internally.
+        identity_override = auth_config.get('ssh_config_identity_override',
+                                            None)
+        if identity_override is not None:
+            key_path_for_config = identity_override
 
         docker_proxy_command_generator = None
         proxy_command_for_nodes = proxy_command
@@ -564,9 +579,16 @@ class SSHConfigHelper:
                 node_proxy_command = node_proxy_command.replace('%w', str(i))
             # TODO(romilb): Update port number when k8s supports multinode
             codegen += cls._get_generated_config(
-                sky_autogen_comment, cluster_name_on_cloud, node_name, ip,
-                username, key_path_for_config, node_proxy_command, port,
-                docker_proxy_command) + '\n'
+                sky_autogen_comment,
+                cluster_name_on_cloud,
+                node_name,
+                ip,
+                username,
+                key_path_for_config,
+                node_proxy_command,
+                port,
+                docker_proxy_command,
+                certificate_file=certificate_file) + '\n'
 
         cluster_config_path = os.path.expanduser(
             cls.ssh_cluster_path.format(cluster_name))

@@ -1098,6 +1098,7 @@ def srun_sshd_command(
     unix_user: str,
     cluster_name_on_cloud: str,
     is_container_image: bool,
+    container_runtime: Optional[str] = None,
 ) -> str:
     """Build srun command for launching sshd -i inside a Slurm job.
 
@@ -1110,6 +1111,7 @@ def srun_sshd_command(
         unix_user: The Unix user for the job
         cluster_name_on_cloud: SkyPilot cluster name on Slurm side.
         is_container_image: Whether the cluster is on containers.
+        container_runtime: The container runtime ('pyxis' or 'podman-hpc').
 
     Returns:
         List of command arguments to be extended to ssh base command
@@ -1123,21 +1125,18 @@ def srun_sshd_command(
     # to a file and sourcing it.
 
     if is_container_image:
-        # Dropbear + socat bridge for container mode.
+        # Dropbear + socat bridge for container SSH.
         # See slurm-ray.yml.j2 for why we use Dropbear instead of OpenSSH.
         # Dropbear's -i (inetd) mode expects a socket fd on stdin, but srun
         # provides pipes. socat bridges stdin/stdout to a TCP socket.
         ssh_bootstrap_cmd = (
-            # Find dropbear in PATH
             'DROPBEAR=$(command -v dropbear); '
             'if [ -z "$DROPBEAR" ]; then '
             'echo "dropbear not found" >&2; exit 1; fi; '
-            # Find a free port in the ephemeral range
             'while :; do '
             'PORT=$((30000 + RANDOM % 30000)); '
             'ss -tln | awk \'{print $4}\' | grep -q ":$PORT$" || break; '
             'done; '
-            # Start dropbear and wait for it to bind
             '"$DROPBEAR" -F -s -R -p "127.0.0.1:$PORT" & '
             'DROPBEAR_PID=$!; '
             'trap "kill $DROPBEAR_PID 2>/dev/null" EXIT; '
@@ -1149,7 +1148,11 @@ def srun_sshd_command(
             'echo "Error: Timed out waiting for dropbear to start." >&2; '
             'exit 1; fi; '
             'socat STDIO TCP:127.0.0.1:$PORT')
-        return shlex.join([
+
+        # How we enter the container differs by runtime:
+        # - pyxis: srun has native plugin flags
+        # - podman-hpc: srun runs `podman-hpc exec` on the host
+        srun_base = [
             'srun',
             '--overlap',
             '--quiet',
@@ -1161,9 +1164,19 @@ def srun_sshd_command(
             '--ntasks-per-node=1',
             '-w',
             target_node,
-            '--container-remap-root',
-            f'--container-name='
-            f'{pyxis_container_name(cluster_name_on_cloud)}:exec',
+        ]
+        if container_runtime == 'podman-hpc':
+            container_name = podman_hpc_container_name(cluster_name_on_cloud)
+            srun_base += ['podman-hpc', 'exec', container_name]
+        else:
+            # pyxis/enroot
+            srun_base += [
+                '--container-remap-root',
+                f'--container-name='
+                f'{pyxis_container_name(cluster_name_on_cloud)}:exec',
+            ]
+
+        return shlex.join(srun_base + [
             '/bin/bash',
             '-c',
             ssh_bootstrap_cmd,
