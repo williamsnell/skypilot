@@ -87,6 +87,9 @@ def podman_hpc_container_name(cluster_name_on_cloud: str) -> str:
 
 # SSH host key filename for sshd.
 SLURM_SSHD_HOST_KEY_FILENAME = 'skypilot_host_key'
+# Fixed port for persistent Dropbear inside podman-hpc containers.
+# Started from the batch step's cgroup so it survives srun cleanup.
+PODMAN_HPC_DROPBEAR_PORT = 2222
 
 
 def get_slurm_ssh_config() -> SSHConfig:
@@ -1124,8 +1127,33 @@ def srun_sshd_command(
     # etc.) because sshd/dropbear spawns a fresh shell. Fix by capturing env
     # to a file and sourcing it.
 
+    if is_container_image and container_runtime == 'podman-hpc':
+        # For podman-hpc, Dropbear is already running persistently inside
+        # the container (started from the batch step's cgroup). Just
+        # forward stdin/stdout to it via socat.
+        return shlex.join([
+            'srun',
+            '--overlap',
+            '--quiet',
+            '--unbuffered',
+            '--jobid',
+            job_id,
+            '--nodes=1',
+            '--ntasks=1',
+            '--ntasks-per-node=1',
+            '-w',
+            target_node,
+            'podman-hpc',
+            'exec',
+            '-i',
+            podman_hpc_container_name(cluster_name_on_cloud),
+            'socat',
+            'STDIO',
+            f'TCP:127.0.0.1:{PODMAN_HPC_DROPBEAR_PORT}',
+        ])
+
     if is_container_image:
-        # Dropbear + socat bridge for container SSH.
+        # Dropbear + socat bridge for pyxis/enroot container SSH.
         # See slurm-ray.yml.j2 for why we use Dropbear instead of OpenSSH.
         # Dropbear's -i (inetd) mode expects a socket fd on stdin, but srun
         # provides pipes. socat bridges stdin/stdout to a TCP socket.
@@ -1148,11 +1176,7 @@ def srun_sshd_command(
             'echo "Error: Timed out waiting for dropbear to start." >&2; '
             'exit 1; fi; '
             'socat STDIO TCP:127.0.0.1:$PORT')
-
-        # How we enter the container differs by runtime:
-        # - pyxis: srun has native plugin flags
-        # - podman-hpc: srun runs `podman-hpc exec` on the host
-        srun_base = [
+        return shlex.join([
             'srun',
             '--overlap',
             '--quiet',
@@ -1164,19 +1188,9 @@ def srun_sshd_command(
             '--ntasks-per-node=1',
             '-w',
             target_node,
-        ]
-        if container_runtime == 'podman-hpc':
-            container_name = podman_hpc_container_name(cluster_name_on_cloud)
-            srun_base += ['podman-hpc', 'exec', '-i', container_name]
-        else:
-            # pyxis/enroot
-            srun_base += [
-                '--container-remap-root',
-                f'--container-name='
-                f'{pyxis_container_name(cluster_name_on_cloud)}:exec',
-            ]
-
-        return shlex.join(srun_base + [
+            '--container-remap-root',
+            f'--container-name='
+            f'{pyxis_container_name(cluster_name_on_cloud)}:exec',
             '/bin/bash',
             '-c',
             ssh_bootstrap_cmd,

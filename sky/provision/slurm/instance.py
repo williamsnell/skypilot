@@ -287,10 +287,27 @@ def _sbatch_keep_alive_block(
         f'export HOME={sky_cluster_home_dir} && '
         f'export SKY_RUNTIME_DIR={skypilot_runtime_dir} && '
         f'python -m sky.skylet.attempt_skylet')
-    return ('# Wait for start_skylet signal, then launch Skylet from the\n'
-            '# batch step cgroup (survives srun step cleanup).\n'
+    # Set up authorized_keys and start persistent Dropbear inside the
+    # container. Both run from the batch step's cgroup so they survive
+    # srun step cleanup. Dropbear persists for the job lifetime, so SSH
+    # sessions (and their children like tmux/nohup) also survive.
+    auth_keys_src = f'{sky_cluster_home_dir}/.ssh/authorized_keys'
+    dropbear_port = slurm_utils.PODMAN_HPC_DROPBEAR_PORT
+    setup_and_dropbear_cmd = (
+        f'mkdir -p /root/.ssh && '
+        f'cp {auth_keys_src} /root/.ssh/authorized_keys 2>/dev/null; '
+        f'chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && '
+        f'DROPBEAR=$(command -v dropbear) && '
+        f'"$DROPBEAR" -F -s -R -p 127.0.0.1:{dropbear_port}')
+    return ('# Wait for start_skylet signal, then launch services from\n'
+            '# the batch step cgroup (survives srun step cleanup).\n'
             f'while [ ! -f {signal_file} ]; do sleep 1; done\n'
             f'rm -f {signal_file}\n'
+            '# Start persistent Dropbear SSH server inside the container.\n'
+            f'podman-hpc exec -d {shlex.quote(container_name)} '
+            f'bash -c {shlex.quote(setup_and_dropbear_cmd)}\n'
+            f'echo "[sbatch] Dropbear started on port {dropbear_port}"\n'
+            '# Start Skylet inside the container.\n'
             f'podman-hpc exec -d {shlex.quote(container_name)} '
             f'bash -c {shlex.quote(skylet_cmd)}\n'
             f'echo "[sbatch] Skylet started from batch step"\n'
@@ -761,12 +778,23 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
             with open(os.path.expanduser(pub_key_path), 'r',
                       encoding='utf-8') as f:
                 skypilot_public_key = f.read().strip()
+            # Write to the host user's authorized_keys (for non-container
+            # sshd) and to the sky cluster home dir (where the batch step
+            # can copy it into /root/.ssh/ for Dropbear).
+            quoted_key = shlex.quote(skypilot_public_key)
             authorized_keys_block = (
-                f'mkdir -p ~{ssh_user}/.ssh && '
-                f'echo {shlex.quote(skypilot_public_key)} '
-                f'>> ~{ssh_user}/.ssh/authorized_keys && '
-                f'chmod 700 ~{ssh_user}/.ssh && '
-                f'chmod 600 ~{ssh_user}/.ssh/authorized_keys')
+                f'USER_HOME=$(getent passwd {ssh_user} '
+                f'| cut -d: -f6) && '
+                f'mkdir -p "$USER_HOME/.ssh" && '
+                f'echo {quoted_key} '
+                f'>> "$USER_HOME/.ssh/authorized_keys" && '
+                f'chmod 700 "$USER_HOME/.ssh" && '
+                f'chmod 600 "$USER_HOME/.ssh/authorized_keys" && '
+                f'mkdir -p {sky_cluster_home_dir}/.ssh && '
+                f'echo {quoted_key} '
+                f'>> {sky_cluster_home_dir}/.ssh/authorized_keys && '
+                f'chmod 700 {sky_cluster_home_dir}/.ssh && '
+                f'chmod 600 {sky_cluster_home_dir}/.ssh/authorized_keys')
         except FileNotFoundError:
             logger.warning(f'SkyPilot public key not found at {pub_key_path}.'
                            ' SSH proxy may not work.')
