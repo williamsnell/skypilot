@@ -255,6 +255,49 @@ def _enroot_container_name_global_scope(cluster_name_on_cloud: str) -> str:
     return f'pyxis_{slurm_utils.pyxis_container_name(cluster_name_on_cloud)}'
 
 
+def _sbatch_keep_alive_block(
+    container_image: Optional[str],
+    proctrack_type: Optional[str],
+    container_runtime: Optional[str],
+    sky_cluster_home_dir: str,
+    skypilot_runtime_dir: str,
+    cluster_name_on_cloud: str,
+) -> str:
+    """Build the block that keeps the sbatch job alive.
+
+    For most cases, this is just `sleep infinity` or `wait`.
+    For podman-hpc with proctrack/cgroup, the batch step also launches
+    the Skylet: processes started via srun steps get killed by cgroup
+    cleanup, but processes started from the batch step survive for the
+    lifetime of the job.
+    """
+    if container_image is None:
+        return 'sleep infinity'
+    if container_runtime != 'podman-hpc' or proctrack_type != 'cgroup':
+        return 'wait'
+
+    # podman-hpc + proctrack/cgroup: wait for start_skylet_on_head_node
+    # to signal us, then launch the Skylet from the batch step's cgroup.
+    container_name = slurm_utils.podman_hpc_container_name(
+        cluster_name_on_cloud)
+    signal_file = (f'{sky_cluster_home_dir}/'
+                   f'{skylet_constants.SLURM_SKYLET_START_SIGNAL}')
+    skylet_cmd = (
+        f'source {skypilot_runtime_dir}/skypilot-runtime/bin/activate && '
+        f'export HOME={sky_cluster_home_dir} && '
+        f'export SKY_RUNTIME_DIR={skypilot_runtime_dir} && '
+        f'python -m sky.skylet.attempt_skylet')
+    return ('# Wait for start_skylet signal, then launch Skylet from the\n'
+            '# batch step cgroup (survives srun step cleanup).\n'
+            f'while [ ! -f {signal_file} ]; do sleep 1; done\n'
+            f'rm -f {signal_file}\n'
+            f'podman-hpc exec -d {shlex.quote(container_name)} '
+            f'bash -c {shlex.quote(skylet_cmd)}\n'
+            f'echo "[sbatch] Skylet started from batch step"\n'
+            '# Keep allocation alive.\n'
+            'wait')
+
+
 def _wait_for_job_ready(
     login_node_runner: 'command_runner.SSHCommandRunner',
     tracker: 'slurm.SlurmJobInfo',
@@ -793,7 +836,9 @@ echo '{proctrack_type or "unknown"}' > {sky_cluster_home_dir}/{skylet_constants.
 touch {sky_cluster_home_dir}/.hushlogin
 {container_block}
 {f'touch {ready_signal}' if container_image is None else ''}
-{'sleep infinity' if container_image is None else 'wait'}
+{_sbatch_keep_alive_block(container_image, proctrack_type, container_runtime,
+                          sky_cluster_home_dir, skypilot_runtime_dir,
+                          cluster_name_on_cloud)}
 """
     # fmt: on
     # pylint: enable=line-too-long

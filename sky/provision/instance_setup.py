@@ -525,6 +525,30 @@ def start_skylet_on_head_node(
     head_runner = runners[0]
     assert cluster_info.head_instance_id is not None, cluster_info
     log_path_abs = str(provision_logging.get_log_path())
+
+    # For Slurm with podman-hpc and proctrack/cgroup, the Skylet must
+    # be launched from the sbatch batch step (not an srun step) to
+    # survive cgroup cleanup. We signal the sbatch script to start it.
+    provider_config = (cluster_info.provider_config
+                       if cluster_info.provider_config else {})
+    container_runtime = provider_config.get('container_runtime')
+    if (cluster_info.provider_name == 'slurm' and
+            container_runtime == 'podman-hpc'):
+        signal_file = constants.SLURM_SKYLET_START_SIGNAL
+        logger.info('Signaling sbatch script to start Skylet '
+                    '(proctrack/cgroup mode)')
+        returncode, stdout, stderr = head_runner.run(
+            f'touch $HOME/{signal_file}',
+            stream_logs=False,
+            require_outputs=True,
+            log_path=log_path_abs)
+        if returncode:
+            raise RuntimeError('Failed to signal Skylet start on the head node '
+                               f'(exit code {returncode}). Error: '
+                               f'===== stdout ===== \n{stdout}\n'
+                               f'===== stderr ====={stderr}')
+        return
+
     logger.info(f'Running command on head node: {MAYBE_SKYLET_RESTART_CMD}')
     # We need to source bashrc for skylet to make sure the autostop event can
     # access the path to the cloud CLIs.

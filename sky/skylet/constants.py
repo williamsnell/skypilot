@@ -690,6 +690,11 @@ X86_64_ARCH = 'x86_64'
 # Used by the executor to conditionally apply multi-node barrier.
 SLURM_PROCTRACK_TYPE_FILE = '.sky_proctrack_type'
 
+# Signal file touched by start_skylet_on_head_node to tell the sbatch
+# script to start the Skylet. Used on proctrack/cgroup systems where
+# the Skylet must be launched from the batch step's cgroup to survive.
+SLURM_SKYLET_START_SIGNAL = '.sky_start_skylet'
+
 SSH_DISABLE_LATENCY_MEASUREMENT_ENV_VAR = (
     f'{SKYPILOT_ENV_VAR_PREFIX}SSH_DISABLE_LATENCY_MEASUREMENT')
 
