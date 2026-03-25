@@ -869,7 +869,7 @@ trap cleanup EXIT
 trap 'exit 0' TERM
 
 # Create sky home directory and subdirectories for the cluster.
-mkdir -p {sky_cluster_home_dir}/sky_logs {sky_cluster_home_dir}/sky_workdir {sky_cluster_home_dir}/.sky
+mkdir -p {sky_cluster_home_dir}/sky_logs {sky_cluster_home_dir}/sky_workdir {sky_cluster_home_dir}/sky_templates {sky_cluster_home_dir}/.sky
 # Create sky runtime directory on each node, including .sky/sky_app
 # which is needed under the runtime dir for podman-hpc (where the
 # runtime dir is mounted as /root inside the container).
