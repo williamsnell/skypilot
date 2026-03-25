@@ -653,7 +653,9 @@ echo 'alias sudo=""' >> ~/.bashrc
 # .bashrc). Without this, Dockerfile ENV vars like /usr/local/bin in
 # PATH and CUDA library paths would be missing.
 echo "export PATH=\\"$PATH\\"" >> ~/.profile
-echo "export LD_LIBRARY_PATH=\\"$LD_LIBRARY_PATH\\"" >> ~/.profile
+# Include /usr/lib64 for NVIDIA driver libs (libcuda.so) mounted
+# at runtime by --gpu, which aren't in the Dockerfile's LD_LIBRARY_PATH.
+echo "export LD_LIBRARY_PATH=\\"/usr/lib64:$LD_LIBRARY_PATH\\"" >> ~/.profile
 echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
 """
         else:
