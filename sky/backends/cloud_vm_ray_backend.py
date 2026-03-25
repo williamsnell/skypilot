@@ -2412,34 +2412,34 @@ class CloudVmRayResourceHandle(backends.backend.ResourceHandle):
             logger.warning(
                 f'Failed to cleanup SSH tunnel process {tunnel_info.pid}: {e}')
 
-    def _get_skylet_tunnel_runner(self) -> command_runner.SSHCommandRunner:
-        """Get the SSH runner for the Skylet gRPC tunnel.
-
-        For most clouds, this is the normal head runner (SSH to the VM).
-        For Slurm+podman-hpc, the Skylet runs inside the container, so
-        we use the cluster's SSH config which goes through the WebSocket
-        proxy → Dropbear path directly into the container.
-        """
+    def is_slurm_podman_hpc(self) -> bool:
+        """Check if this is a Slurm cluster with podman-hpc runtime."""
+        if not isinstance(self.launched_resources.cloud, clouds.Slurm):
+            return False
         cached_info = self.cached_cluster_info
-        if (isinstance(self.launched_resources.cloud, clouds.Slurm) and
-                cached_info and cached_info.provider_config and
+        return (cached_info is not None and
+                cached_info.provider_config is not None and
                 cached_info.provider_config.get('container_runtime')
-                == 'podman-hpc'):
-            # Use the cluster's SSH config entry (will-cluster) which
-            # connects through WebSocket proxy → Dropbear → container.
-            # This reaches the Skylet's gRPC port inside the container.
-            ssh_key = os.path.expanduser(
-                cluster_utils.SSHConfigHelper.ssh_cluster_key_path.format(
-                    self.cluster_name))
-            return command_runner.SSHCommandRunner(
-                (self.cluster_name, 22),
-                'root',
-                ssh_key,
-                disable_control_master=True,
-                port_forward_execute_remote_command=True,
-            )
-        runners = self.get_command_runners()
-        return runners[0]
+                == 'podman-hpc')
+
+    def get_container_ssh_runner(self) -> command_runner.SSHCommandRunner:
+        """Get an SSH runner that connects into the container via Dropbear.
+
+        For Slurm+podman-hpc, this uses the cluster's SSH config entry
+        which goes through WebSocket proxy → Dropbear → container.
+        This is the same pattern as Vast/RunPod where SSH lands inside
+        Docker. Processes started this way inherit the batch step's
+        cgroup and survive srun step cleanup.
+        """
+        ssh_key = os.path.expanduser(
+            cluster_utils.SSHConfigHelper.ssh_cluster_key_path.format(
+                self.cluster_name))
+        return command_runner.SSHCommandRunner(
+            (self.cluster_name, 22),
+            'root',
+            ssh_key,
+            disable_control_master=True,
+        )
 
     def _open_and_update_skylet_tunnel(self) -> SSHTunnelInfo:
         """Opens an SSH tunnel to the Skylet on the head node,
@@ -2448,7 +2448,11 @@ class CloudVmRayResourceHandle(backends.backend.ResourceHandle):
         # There could be a race condition here, as multiple processes may
         # attempt to open the same port at the same time.
         for attempt in range(max_attempts):
-            head_runner = self._get_skylet_tunnel_runner()
+            if self.is_slurm_podman_hpc():
+                head_runner = self.get_container_ssh_runner()
+            else:
+                runners = self.get_command_runners()
+                head_runner = runners[0]
             local_port = random.randint(10000, 65535)
             try:
                 ssh_tunnel_proc = backend_utils.open_ssh_tunnel(
@@ -2545,19 +2549,9 @@ class CloudVmRayResourceHandle(backends.backend.ResourceHandle):
     @property
     def is_grpc_enabled_with_flag(self) -> bool:
         """Returns whether this handle has gRPC enabled and gRPC flag is set."""
-        if not (env_options.Options.ENABLE_GRPC.get() and self.is_grpc_enabled):
-            return False
-        # Slurm with pyxis disables gRPC because the SSH tunnel can't
-        # reach the Skylet on the compute node (SSH goes to login node).
-        # Slurm with podman-hpc enables gRPC because we have a working
-        # SSH path into the container via Dropbear (WebSocket proxy).
-        if isinstance(self.launched_resources.cloud, clouds.Slurm):
-            cached_info = self.cached_cluster_info
-            if cached_info and cached_info.provider_config:
-                return (cached_info.provider_config.get('container_runtime') ==
-                        'podman-hpc')
-            return False
-        return True
+        return (env_options.Options.ENABLE_GRPC.get() and
+                self.is_grpc_enabled and
+                not isinstance(self.launched_resources.cloud, clouds.Slurm))
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -5550,6 +5544,26 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         head_runner = runners[0]
         if under_remote_workdir:
             cmd = f'cd {SKY_REMOTE_WORKDIR} && {cmd}'
+
+        # For Slurm+podman-hpc, run_driver() goes through srun on the
+        # host, where nohup'd processes get killed by cgroup cleanup.
+        # Instead, use the Dropbear SSH path into the container — same
+        # pattern as Vast/RunPod where SSH lands inside Docker. Processes
+        # started this way inherit the batch step's cgroup and survive.
+        if handle.is_slurm_podman_hpc():
+            container_runner = handle.get_container_ssh_runner()
+            return container_runner.run(
+                cmd,
+                port_forward=port_forward,
+                log_path=log_path,
+                process_stream=process_stream,
+                stream_logs=stream_logs,
+                ssh_mode=ssh_mode,
+                require_outputs=require_outputs,
+                separate_stderr=separate_stderr,
+                source_bashrc=source_bashrc,
+                **kwargs,
+            )
 
         return head_runner.run_driver(
             cmd,
