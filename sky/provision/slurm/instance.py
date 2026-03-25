@@ -710,6 +710,7 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'{"--label " if num_nodes > 1 else ""}--unbuffered '
                 f'--nodes={num_nodes} --ntasks-per-node=1 '
                 f'podman-hpc run --gpu '
+                f'--env SLURM_PROCID=$SLURM_PROCID '
                 f'--name {shlex.quote(podman_container_name)} '
                 f'--replace '
                 f'{podman_mount_args} '
