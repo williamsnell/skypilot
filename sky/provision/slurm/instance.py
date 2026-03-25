@@ -709,7 +709,7 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'srun --overlap '
                 f'{"--label " if num_nodes > 1 else ""}--unbuffered '
                 f'--nodes={num_nodes} --ntasks-per-node=1 '
-                f'podman-hpc run --gpu --env-host '
+                f'podman-hpc run --gpu '
                 f'--name {shlex.quote(podman_container_name)} '
                 f'--replace '
                 f'{podman_mount_args} '
