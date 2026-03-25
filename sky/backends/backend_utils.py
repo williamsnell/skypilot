@@ -1580,24 +1580,6 @@ def ssh_credential_from_yaml(
     # If we are running ssh command on kubernetes node.
     if 'kubernetes' in ssh_provider_module:
         credentials['disable_control_master'] = True
-    # For Slurm, the SSH config needs the provider's SSH parameters
-    # (ProxyJump, CertificateFile, private key) to connect to the login
-    # node. These are separate from the SkyPilot auth key used internally.
-    if 'slurm' in ssh_provider_module:
-        provider_ssh = config.get('provider', {}).get('ssh', {})
-        cert_file = provider_ssh.get('certificate_file')
-        proxy_jump = provider_ssh.get('proxyjump')
-        provider_key = provider_ssh.get('private_key')
-        if proxy_jump and ssh_proxy_command is None:
-            credentials['ssh_proxy_command'] = (
-                command_runner.proxyjump_to_proxycommand(
-                    proxy_jump,
-                    ssh_private_key=provider_key,
-                    ssh_certificate_file=cert_file))
-        # Note: we do NOT override IdentityFile here. The ProxyCommand
-        # already embeds the provider's key and certificate for login
-        # node auth. The IdentityFile stays as the SkyPilot key, which
-        # is what Dropbear's authorized_keys expects for the final hop.
     return credentials
 
 
