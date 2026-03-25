@@ -608,6 +608,10 @@ def _create_virtual_instance(
         mount_paths = [
             f'{remote_home_dir}:{remote_home_dir}',
             f'{host_ccache_dir}:{container_ccache_dir}',
+            # Mount the runtime dir so host and container share the
+            # same DB, venv, and Skylet state (host /tmp is not
+            # visible inside the container by default).
+            f'{skypilot_runtime_dir}:{skypilot_runtime_dir}',
         ]
         # When workdir differs from remote_home_dir (e.g. workdir is on
         # NFS at /home/ubuntu while $HOME is /home_local/ubuntu), mount
