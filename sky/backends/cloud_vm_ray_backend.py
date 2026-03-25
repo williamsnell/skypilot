@@ -3729,12 +3729,12 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         # Sync the setup script up and run it.
         internal_ips = handle.internal_ips()
         remote_setup_file_name = f'/tmp/sky_setup_{self.run_timestamp}'
+        runners = handle.get_command_runners(avoid_ssh_control=True)
         # Need this `-i` option to make sure `source ~/.bashrc` work
         setup_cmd = f'/bin/bash -i {remote_setup_file_name} 2>&1'
         unset_ray_env_vars = ' && '.join(
             [f'unset {var}' for var in task_codegen.UNSET_RAY_ENV_VARS])
         setup_cmd = f'{unset_ray_env_vars}; {setup_cmd}'
-        runners = handle.get_command_runners(avoid_ssh_control=True)
 
         def _setup_node(node_id: int) -> None:
             setup_envs = task_lib.get_plaintext_envs_and_secrets(
