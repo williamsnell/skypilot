@@ -648,6 +648,12 @@ INIT_START=$SECONDS
 apt-get update || echo "[container-init] WARNING: apt-get update had errors (continuing)"
 apt-get install -y ca-certificates rsync curl git wget fuse
 echo 'alias sudo=""' >> ~/.bashrc
+# Persist the container's PATH and LD_LIBRARY_PATH for Dropbear SSH
+# sessions. Dropbear starts login shells which source .profile (not
+# .bashrc). Without this, Dockerfile ENV vars like /usr/local/bin in
+# PATH and CUDA library paths would be missing.
+echo "export PATH=\\"$PATH\\"" >> ~/.profile
+echo "export LD_LIBRARY_PATH=\\"$LD_LIBRARY_PATH\\"" >> ~/.profile
 echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
 """
         else:
