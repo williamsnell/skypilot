@@ -291,6 +291,8 @@ def _sbatch_keep_alive_block(
     # container. Both run from the batch step's cgroup so they survive
     # srun step cleanup. Dropbear persists for the job lifetime, so SSH
     # sessions (and their children like tmux/nohup) also survive.
+    # No .bashrc/.profile hacks needed — the runtime dir is mounted as
+    # /root, so HOME=/root gives the right paths automatically.
     auth_keys_src = f'{sky_cluster_home_dir}/.ssh/authorized_keys'
     dropbear_port = slurm_utils.PODMAN_HPC_DROPBEAR_PORT
     setup_and_dropbear_cmd = (
@@ -613,6 +615,18 @@ def _create_virtual_instance(
             # visible inside the container by default).
             f'{skypilot_runtime_dir}:{skypilot_runtime_dir}',
         ]
+        if container_runtime == 'podman-hpc':
+            # Mount the runtime dir as /root so HOME=/root works
+            # with no SKY_RUNTIME_DIR — same as RunPod/Vast where
+            # everything lives under $HOME inside the container.
+            # Also mount shared-storage dirs (sky_logs, sky_workdir)
+            # under /root so they're accessible via ~/sky_logs etc.
+            mount_paths += [
+                f'{skypilot_runtime_dir}:/root',
+                f'{sky_cluster_home_dir}/sky_logs:/root/sky_logs',
+                f'{sky_cluster_home_dir}/sky_workdir:/root/sky_workdir',
+                f'{sky_cluster_home_dir}/sky_templates:/root/sky_templates',
+            ]
         # When workdir differs from remote_home_dir (e.g. workdir is on
         # NFS at /home/ubuntu while $HOME is /home_local/ubuntu), mount
         # it so the container can access sky_cluster_home_dir.
@@ -856,8 +870,10 @@ trap 'exit 0' TERM
 
 # Create sky home directory and subdirectories for the cluster.
 mkdir -p {sky_cluster_home_dir}/sky_logs {sky_cluster_home_dir}/sky_workdir {sky_cluster_home_dir}/.sky
-# Create sky runtime directory on each node.
-srun --nodes={num_nodes} mkdir -p {skypilot_runtime_dir}
+# Create sky runtime directory on each node, including .sky/sky_app
+# which is needed under the runtime dir for podman-hpc (where the
+# runtime dir is mounted as /root inside the container).
+srun --nodes={num_nodes} mkdir -p {skypilot_runtime_dir}/.sky/sky_app
 # Set up authorized_keys for SSH proxy (Dropbear) authentication.
 {authorized_keys_block}
 # Marker file to indicate we're in a Slurm cluster.

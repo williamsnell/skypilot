@@ -5552,6 +5552,9 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         # started this way inherit the batch step's cgroup and survive.
         if handle.is_slurm_podman_hpc():
             container_runner = handle.get_container_ssh_runner()
+            # SSH into the container via Dropbear. The runtime dir is
+            # mounted as /root, so HOME=/root gives the right paths
+            # with no SKY_RUNTIME_DIR needed (same as RunPod/Vast).
             return container_runner.run(
                 cmd,
                 port_forward=port_forward,
