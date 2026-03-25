@@ -2425,19 +2425,65 @@ class CloudVmRayResourceHandle(backends.backend.ResourceHandle):
     def get_container_ssh_runner(self) -> command_runner.SSHCommandRunner:
         """Get an SSH runner that connects into the container via Dropbear.
 
-        For Slurm+podman-hpc, this uses the cluster's SSH config entry
-        which goes through WebSocket proxy → Dropbear → container.
-        This is the same pattern as Vast/RunPod where SSH lands inside
-        Docker. Processes started this way inherit the batch step's
-        cgroup and survive srun step cleanup.
+        Builds a direct SSH path bypassing the WebSocket proxy:
+        local → login node → srun socat → Dropbear → container.
+        The WebSocket proxy can't be used from the API server because
+        it would deadlock (the server would route through itself).
+
+        Processes started this way inherit the batch step's cgroup
+        and survive srun step cleanup — same as Vast/RunPod where
+        SSH lands inside Docker.
         """
+        cached_info = self.cached_cluster_info
+        assert cached_info is not None and cached_info.provider_config
+        ssh_config = cached_info.provider_config['ssh']
+        head_instance = cached_info.get_head_instance()
+        assert head_instance is not None
+
+        job_id = head_instance.tags['job_id']
+        node = head_instance.tags['node']
+        container_name = slurm_utils.podman_hpc_container_name(
+            self.cluster_name_on_cloud)
+
+        # Write a proxy script that SSH's to the login node and runs
+        # srun socat to reach Dropbear. Using a script file avoids
+        # nested quoting issues with inline ProxyCommand.
+        proxy_script_path = os.path.expanduser(
+            f'~/.sky/generated/ssh-proxy-{self.cluster_name}.sh')
+        socat_cmd = (f'srun --overlap --quiet --unbuffered '
+                     f'--jobid={job_id} --nodelist={node} '
+                     f'--nodes=1 --ntasks=1 '
+                     f'podman-hpc exec -i {container_name} '
+                     f'socat STDIO '
+                     f'TCP:127.0.0.1:{slurm_utils.PODMAN_HPC_DROPBEAR_PORT}')
+        proxy_script = '#!/bin/bash\n'
+        proxy_script += 'exec ssh -T'
+        if ssh_config.get('private_key'):
+            proxy_script += f' -i {ssh_config["private_key"]}'
+        if ssh_config.get('certificate_file'):
+            proxy_script += (f' -o CertificateFile='
+                             f'{ssh_config["certificate_file"]}')
+        proxy_script += (' -o StrictHostKeyChecking=no'
+                         ' -o UserKnownHostsFile=/dev/null'
+                         ' -o LogLevel=ERROR')
+        if ssh_config.get('proxyjump'):
+            proxy_script += f' -J {ssh_config["proxyjump"]}'
+        proxy_script += (f' {ssh_config["user"]}@{ssh_config["hostname"]}'
+                         f' {shlex.quote(socat_cmd)}\n')
+
+        os.makedirs(os.path.dirname(proxy_script_path), exist_ok=True)
+        with open(proxy_script_path, 'w', encoding='utf-8') as f:
+            f.write(proxy_script)
+        os.chmod(proxy_script_path, 0o755)
+
         ssh_key = os.path.expanduser(
             cluster_utils.SSHConfigHelper.ssh_cluster_key_path.format(
                 self.cluster_name))
         return command_runner.SSHCommandRunner(
-            (self.cluster_name, 22),
+            ('localhost', 22),
             'root',
             ssh_key,
+            ssh_proxy_command=proxy_script_path,
             disable_control_master=True,
         )
 
@@ -3854,8 +3900,6 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
 
         def _dump_code_to_file(codegen: str,
                                target_dir: str = SKY_REMOTE_APP_DIR) -> None:
-            runners = handle.get_command_runners()
-            head_runner = runners[0]
             with tempfile.NamedTemporaryFile('w', prefix='sky_app_') as fp:
                 fp.write(codegen)
                 fp.flush()
@@ -3863,10 +3907,21 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 # We choose to sync code + exec, because the alternative of
                 # 'ray submit' may not work as it may use system python
                 # (python2) to execute the script. Happens for AWS.
-                head_runner.rsync_driver(source=fp.name,
-                                         target=script_path,
-                                         up=True,
-                                         stream_logs=False)
+                # For podman-hpc, rsync through the container SSH runner
+                # so files land at /root/.sky/sky_app/ (runtime dir mount).
+                if handle.is_slurm_podman_hpc():
+                    container_runner = handle.get_container_ssh_runner()
+                    container_runner.rsync(source=fp.name,
+                                           target=script_path,
+                                           up=True,
+                                           stream_logs=False)
+                else:
+                    runners = handle.get_command_runners()
+                    head_runner = runners[0]
+                    head_runner.rsync_driver(source=fp.name,
+                                             target=script_path,
+                                             up=True,
+                                             stream_logs=False)
 
         mkdir_code = f'mkdir -p {remote_log_dir} && touch {remote_log_path}'
         encoded_script = shlex.quote(codegen)
@@ -3969,7 +4024,11 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 use_legacy = True
 
         if use_legacy:
-            if backend_utils.is_command_length_over_limit(job_submit_cmd):
+            # For podman-hpc, always dump to file — the Dropbear SSH
+            # path has an ~8KB command length limit (socat buffer).
+            is_podman_hpc = (is_slurm and handle.is_slurm_podman_hpc())
+            if (is_podman_hpc or
+                    backend_utils.is_command_length_over_limit(job_submit_cmd)):
                 _dump_code_to_file(codegen)
                 job_submit_cmd = f'{mkdir_code} && {code}'
 
@@ -6254,14 +6313,19 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
             assert (slurm_job_id
                     is not None), ('job_id tag not found in head instance')
             container_image = handle.launched_resources.extract_docker_image()
+            is_podman_hpc = handle.is_slurm_podman_hpc()
             container_name = None
-            if container_image is not None:
+            if container_image is not None and not is_podman_hpc:
+                # Pyxis/enroot: pass container name for --container-name
+                # flags on srun. podman-hpc doesn't use pyxis — the driver
+                # already runs inside the container via Dropbear SSH.
                 container_name = slurm_utils.pyxis_container_name(
                     handle.cluster_name_on_cloud)
 
             return task_codegen.SlurmCodeGen(
                 slurm_job_id,
                 container_name,
+                is_podman_hpc=is_podman_hpc,
             )
         else:
             return task_codegen.RayCodeGen()

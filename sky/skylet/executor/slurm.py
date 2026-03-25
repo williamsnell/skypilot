@@ -11,6 +11,7 @@ import shutil
 import socket
 import sys
 import time
+from typing import Optional
 
 import colorama
 import hostlist
@@ -40,10 +41,21 @@ def _get_ip_address() -> str:
     return socket.gethostbyname(socket.gethostname())
 
 
-def _get_job_node_ips() -> str:
-    """Get IPs of all nodes in the current Slurm job."""
+def _get_job_node_ips(cluster_ips_fallback: Optional[str] = None) -> str:
+    """Get IPs of all nodes in the current Slurm job.
+
+    Args:
+        cluster_ips_fallback: Comma-separated cluster IPs to use when
+            SLURM_JOB_NODELIST is not available (e.g., inside podman-hpc
+            containers where srun isn't used).
+    """
     nodelist = os.environ.get('SLURM_JOB_NODELIST', '')
-    assert nodelist, 'SLURM_JOB_NODELIST is not set'
+    if not nodelist:
+        # podman-hpc: running directly without srun, so SLURM_JOB_NODELIST
+        # is not set. Fall back to cluster IPs from the command line.
+        if cluster_ips_fallback:
+            return cluster_ips_fallback.replace(',', '\n')
+        assert False, 'SLURM_JOB_NODELIST is not set and no fallback provided'
 
     # Expand compressed nodelist (e.g., "node[1-3,5]" -> "node1\nnode2...")
     # Alternative: `scontrol show hostnames $SLURM_JOB_NODELIST`, but `scontrol`
@@ -98,19 +110,16 @@ def main():
         'Either '
         '--script or --script-path must be provided')
 
-    # Task rank, different from index of the node in the cluster.
-    rank = int(os.environ['SLURM_PROCID'])
+    # SLURM_PROCID is set by srun (one task per node with
+    # --ntasks-per-node=1), giving each node a sequential index matching
+    # the SLURM_JOB_NODELIST ordering. Without srun (e.g., podman-hpc
+    # where the driver runs directly inside the container), defaults to 0
+    # (head node).
+    rank = int(os.environ.get('SLURM_PROCID', '0'))
+    node_idx = rank
     num_nodes = int(os.environ.get('SLURM_NNODES', 1))
     is_single_node_cluster = (args.cluster_num_nodes == 1)
-
-    # Determine node index from IP (like Ray's cluster_ips_to_node_id)
-    cluster_ips = args.cluster_ips.split(',')
     ip_addr = _get_ip_address()
-    try:
-        node_idx = cluster_ips.index(ip_addr)
-    except ValueError as e:
-        raise RuntimeError(f'IP address {ip_addr} not found in '
-                           f'cluster IPs: {cluster_ips}') from e
     node_name = 'head' if node_idx == 0 else f'worker{node_idx}'
 
     # Log files are written to a shared filesystem, so each node must use a
@@ -140,7 +149,7 @@ def main():
         # For setup, env vars are set in CloudVmRayBackend._setup.
         env_vars['SKYPILOT_NODE_RANK'] = str(rank)
         env_vars['SKYPILOT_NUM_NODES'] = str(num_nodes)
-        env_vars['SKYPILOT_NODE_IPS'] = _get_job_node_ips()
+        env_vars['SKYPILOT_NODE_IPS'] = _get_job_node_ips(args.cluster_ips)
 
     # Signal file coordination for setup/run synchronization
     # Rank 0 touches the allocation signal to indicate resources acquired

@@ -691,16 +691,21 @@ class SlurmCodeGen(TaskCodeGen):
         self,
         slurm_job_id: str,
         container_name: Optional[str],
+        is_podman_hpc: bool = False,
     ):
         """Initialize SlurmCodeGen.
 
         Args:
             slurm_job_id: The Slurm job ID, i.e. SLURM_JOB_ID
             container_name: pyxis container name, or None
+            is_podman_hpc: If True, driver runs inside the container (via
+                Dropbear SSH) and srun is not available. Commands are run
+                directly instead of being wrapped in srun.
         """
         super().__init__()
         self._slurm_job_id = slurm_job_id
         self._container_name = container_name
+        self._is_podman_hpc = is_podman_hpc
 
     def add_prologue(self, job_id: int) -> None:
         assert not self._has_prologue, 'add_prologue() called twice?'
@@ -932,12 +937,17 @@ class SlurmCodeGen(TaskCodeGen):
                         runner_args,
                     ])
                     bash_cmd = shlex.quote(' '.join(cmd_parts))
-                    srun_cmd = (
-                        "unset $(env | awk -F= '/^SLURM_/ {{print $1}}') && "
-                        f'srun --export=ALL --quiet --unbuffered --kill-on-bad-exit --jobid={self._slurm_job_id} '
-                        f'--job-name=sky-{self.job_id}{{job_suffix}} --ntasks-per-node=1{container_flags} {{extra_flags}} '
-                        f'/bin/bash -c {{bash_cmd}}'
-                    )
+                    if {self._is_podman_hpc}:
+                        # podman-hpc: already inside the container via
+                        # Dropbear SSH, srun not available. Run directly.
+                        srun_cmd = f'/bin/bash -c {{bash_cmd}}'
+                    else:
+                        srun_cmd = (
+                            "unset $(env | awk -F= '/^SLURM_/ {{print $1}}') && "
+                            f'srun --export=ALL --quiet --unbuffered --kill-on-bad-exit --jobid={self._slurm_job_id} '
+                            f'--job-name=sky-{self.job_id}{{job_suffix}} --ntasks-per-node=1{container_flags} {{extra_flags}} '
+                            f'/bin/bash -c {{bash_cmd}}'
+                        )
 
                     def cleanup():
                         if script_path is not None:

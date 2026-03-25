@@ -1387,9 +1387,9 @@ def get_command_runners(
     container_marker = (
         f'{sky_cluster_home_dir}/{slurm_utils.SLURM_CONTAINER_MARKER_FILE}')
     has_container = client.check_file_exists(container_marker)
+    container_runtime = provider_config.get('container_runtime', None)
     container_args = None
     if has_container:
-        container_runtime = provider_config.get('container_runtime', None)
         if container_runtime == 'podman-hpc':
             container_args = _build_podman_hpc_args(cluster_name_on_cloud)
         else:
