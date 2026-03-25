@@ -2412,6 +2412,35 @@ class CloudVmRayResourceHandle(backends.backend.ResourceHandle):
             logger.warning(
                 f'Failed to cleanup SSH tunnel process {tunnel_info.pid}: {e}')
 
+    def _get_skylet_tunnel_runner(self) -> command_runner.SSHCommandRunner:
+        """Get the SSH runner for the Skylet gRPC tunnel.
+
+        For most clouds, this is the normal head runner (SSH to the VM).
+        For Slurm+podman-hpc, the Skylet runs inside the container, so
+        we use the cluster's SSH config which goes through the WebSocket
+        proxy → Dropbear path directly into the container.
+        """
+        cached_info = self.cached_cluster_info
+        if (isinstance(self.launched_resources.cloud, clouds.Slurm) and
+                cached_info and cached_info.provider_config and
+                cached_info.provider_config.get('container_runtime')
+                == 'podman-hpc'):
+            # Use the cluster's SSH config entry (will-cluster) which
+            # connects through WebSocket proxy → Dropbear → container.
+            # This reaches the Skylet's gRPC port inside the container.
+            ssh_key = os.path.expanduser(
+                cluster_utils.SSHConfigHelper.ssh_cluster_key_path.format(
+                    self.cluster_name))
+            return command_runner.SSHCommandRunner(
+                (self.cluster_name, 22),
+                'root',
+                ssh_key,
+                disable_control_master=True,
+                port_forward_execute_remote_command=True,
+            )
+        runners = self.get_command_runners()
+        return runners[0]
+
     def _open_and_update_skylet_tunnel(self) -> SSHTunnelInfo:
         """Opens an SSH tunnel to the Skylet on the head node,
         updates the cluster handle, and persists it to the database."""
@@ -2419,8 +2448,7 @@ class CloudVmRayResourceHandle(backends.backend.ResourceHandle):
         # There could be a race condition here, as multiple processes may
         # attempt to open the same port at the same time.
         for attempt in range(max_attempts):
-            runners = self.get_command_runners()
-            head_runner = runners[0]
+            head_runner = self._get_skylet_tunnel_runner()
             local_port = random.randint(10000, 65535)
             try:
                 ssh_tunnel_proc = backend_utils.open_ssh_tunnel(
@@ -2517,9 +2545,19 @@ class CloudVmRayResourceHandle(backends.backend.ResourceHandle):
     @property
     def is_grpc_enabled_with_flag(self) -> bool:
         """Returns whether this handle has gRPC enabled and gRPC flag is set."""
-        return (env_options.Options.ENABLE_GRPC.get() and
-                self.is_grpc_enabled and
-                not isinstance(self.launched_resources.cloud, clouds.Slurm))
+        if not (env_options.Options.ENABLE_GRPC.get() and self.is_grpc_enabled):
+            return False
+        # Slurm with pyxis disables gRPC because the SSH tunnel can't
+        # reach the Skylet on the compute node (SSH goes to login node).
+        # Slurm with podman-hpc enables gRPC because we have a working
+        # SSH path into the container via Dropbear (WebSocket proxy).
+        if isinstance(self.launched_resources.cloud, clouds.Slurm):
+            cached_info = self.cached_cluster_info
+            if cached_info and cached_info.provider_config:
+                return (cached_info.provider_config.get('container_runtime') ==
+                        'podman-hpc')
+            return False
+        return True
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -3859,6 +3897,10 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         # Note: proctrack/cgroup is enabled by default on Nebius' Managed
         # Soperator.
         is_slurm = isinstance(handle.launched_resources.cloud, clouds.Slurm)
+        # For Slurm with pyxis (legacy path), we need to wait for the
+        # job to complete before exiting, because Slurm's proctrack/cgroup
+        # kills all processes when the srun job step ends.
+        # For podman-hpc, gRPC is enabled so this code path isn't reached.
         if is_slurm:
             wait_code = job_lib.JobLibCodeGen.wait_for_job(job_id)
             code = code + ' && ' + wait_code
@@ -3938,8 +3980,8 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 job_submit_cmd = f'{mkdir_code} && {code}'
 
             # For Slurm, run in background so that SSH returns immediately.
-            # This is needed because we add the wait_for_job code above which
-            # makes the command block until the job completes.
+            # This is needed because we add the wait_for_job code above
+            # which makes the command block until the job completes.
             returncode, stdout, stderr = self.run_on_head(
                 handle,
                 job_submit_cmd,
@@ -3961,7 +4003,7 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                     f'Output: {output}')
                 _dump_code_to_file(codegen)
                 job_submit_cmd = f'{mkdir_code} && {code}'
-                # See comment above for why run_in_background=is_slurm.
+                # See comment above for why run_in_background.
                 returncode, stdout, stderr = self.run_on_head(
                     handle,
                     job_submit_cmd,
