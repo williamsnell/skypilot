@@ -1963,7 +1963,10 @@ exec {ssh_command} srun --unbuffered --quiet --overlap \\
             assert self.container_args is not None, (
                 '_run_via_srun with in_container=True called but '
                 'container_args not set')
-            inner_cmd = f'{self._ENV_SETUP} && {cmd}'
+            # Use full home/env setup: both pyxis and podman-hpc mount
+            # sky_dir and skypilot_runtime_dir into the container, so
+            # the same HOME, venv, and paths work in both contexts.
+            inner_cmd = f'{home_and_env} && {cmd}'
             extra_srun_args = f'{self.container_args} '
         else:
             inner_cmd = f'{home_and_env} && {cmd}'
