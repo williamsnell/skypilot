@@ -416,7 +416,7 @@ def optimize(
     """
     dag_str = dag_utils.dump_dag_to_yaml_str(dag)
 
-    slurm_credentials = _get_slurm_credentials_if_remote()
+    slurm_credentials = _get_slurm_credentials_if_remote(dag)
 
     body = payloads.OptimizeBody(dag=dag_str,
                                  minimize=minimize,
@@ -714,29 +714,40 @@ def launch(
         )
 
 
-def _get_slurm_credentials_if_remote() -> Optional[Dict[str, Optional[str]]]:
+def _dag_targets_slurm(dag: 'sky.Dag') -> bool:
+    """Check if any task in the DAG targets Slurm."""
+    for task in dag.tasks:
+        for res in task.resources:
+            if res.cloud is not None and str(res.cloud).lower() == 'slurm':
+                return True
+    return False
+
+
+def _get_slurm_credentials_if_remote(
+    dag: Optional['sky.Dag'] = None,) -> Optional[Dict[str, Optional[str]]]:
     """Read Slurm SSH credentials for transmission to a remote API server.
 
     Returns None if the API server is local, no ~/.sky/slurm/config exists,
     or no skypilot_* key is configured. Safe to call unconditionally.
+    Warns visibly if a DAG targeting Slurm is provided but no valid key
+    is configured.
     """
     if server_common.is_api_server_local():
         return None
     try:
         creds = slurm_utils.get_slurm_credentials_for_remote()
-        if creds is None:
-            # Check if a Slurm config exists — if so, the user likely
-            # intended to use Slurm but their key isn't named skypilot_*.
-            try:
-                slurm_utils.get_slurm_ssh_config()
-                logger.warning(
-                    'Slurm config found at %s but no skypilot_* SSH '
-                    'key configured. Credentials will not be sent to '
-                    'the remote API server. To fix, generate a '
-                    'dedicated key: ssh-keygen -t ed25519 '
-                    '-f ~/.ssh/skypilot_slurm', slurm_utils.DEFAULT_SLURM_PATH)
-            except (FileNotFoundError, OSError):
-                pass  # No Slurm config — not a Slurm user.
+        if creds is None and dag is not None and _dag_targets_slurm(dag):
+            click.echo(
+                f'{colorama.Fore.YELLOW}Warning: Slurm config '
+                f'found at {slurm_utils.DEFAULT_SLURM_PATH} but '
+                f'no skypilot_* SSH key configured. Credentials '
+                f'will not be sent to the remote API server.\n'
+                f'To fix: ssh-keygen -t ed25519 '
+                f'-f ~/.ssh/skypilot_slurm\n'
+                f'Then set IdentityFile ~/.ssh/skypilot_slurm in '
+                f'{slurm_utils.DEFAULT_SLURM_PATH}'
+                f'{colorama.Style.RESET_ALL}',
+                err=True)
         return creds
     except Exception:  # pylint: disable=broad-except
         return None
@@ -830,7 +841,7 @@ def _launch(
 
     dag_str = dag_utils.dump_dag_to_yaml_str(dag)
 
-    slurm_credentials = _get_slurm_credentials_if_remote()
+    slurm_credentials = _get_slurm_credentials_if_remote(dag)
 
     body = payloads.LaunchBody(
         task=dag_str,
@@ -926,7 +937,7 @@ def exec(  # pylint: disable=redefined-builtin
         dag, workdir_only=True)
     dag_str = dag_utils.dump_dag_to_yaml_str(dag)
 
-    slurm_credentials = _get_slurm_credentials_if_remote()
+    slurm_credentials = _get_slurm_credentials_if_remote(dag)
 
     body = payloads.ExecBody(
         task=dag_str,
