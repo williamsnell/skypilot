@@ -209,6 +209,44 @@ def get_certificate_file(ssh_config_dict: Dict[str, Any]) -> Optional[str]:
     return ssh_config_dict.get('certificatefile', None)
 
 
+def make_slurm_client_from_config(
+    ssh_config_dict: Dict[str, Any],
+    cluster_name: Optional[str] = None,
+    **kwargs: Any,
+) -> slurm.SlurmClient:
+    """Create a SlurmClient from an SSH config dict.
+
+    Falls back to stashed ephemeral credentials for user and proxy_jump
+    when they are missing from the server-side config (remote API server).
+    Extra kwargs are forwarded to SlurmClient (e.g. enable_interactive_auth).
+    Raises ValueError if no user can be resolved.
+    """
+    ssh_user = ssh_config_dict.get('user')
+    proxy_jump = ssh_config_dict.get('proxyjump')
+    if not ssh_user and cluster_name:
+        user_hash = os.environ.get(constants.USER_ID_ENV_VAR, '')
+        creds = peek_credentials(user_hash, cluster_name)
+        if creds:
+            ssh_user = creds.get('ssh_user')
+            proxy_jump = proxy_jump or creds.get('proxy_jump')
+    if not ssh_user:
+        raise ValueError(
+            f'SSH user not available for cluster {cluster_name}. '
+            'Ensure User is set in ~/.sky/slurm/config or that the '
+            'client sends credentials with the request.')
+    return slurm.SlurmClient(
+        ssh_config_dict['hostname'],
+        int(ssh_config_dict.get('port', 22)),
+        ssh_user,
+        get_identity_file(ssh_config_dict),
+        ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
+        ssh_proxy_jump=proxy_jump,
+        identities_only=get_identities_only(ssh_config_dict),
+        ssh_certificate_file=get_certificate_file(ssh_config_dict),
+        **kwargs,
+    )
+
+
 def get_container_runtime(ssh_config_dict: Dict[str, Any]) -> Optional[str]:
     """Get ContainerRuntime from SSH config, or None if not specified.
 
@@ -247,16 +285,7 @@ def _get_slurm_nodes_info(cluster: str) -> List[slurm.NodeInfo]:
 
     ssh_config = get_slurm_ssh_config()
     ssh_config_dict = ssh_config.lookup(cluster)
-    client = slurm.SlurmClient(
-        ssh_config_dict['hostname'],
-        int(ssh_config_dict.get('port', 22)),
-        ssh_config_dict['user'],
-        get_identity_file(ssh_config_dict),
-        ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
-        ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),
-        identities_only=get_identities_only(ssh_config_dict),
-        ssh_certificate_file=get_certificate_file(ssh_config_dict),
-    )
+    client = make_slurm_client_from_config(ssh_config_dict, cluster)
     nodes_info = client.info_nodes()
 
     try:
@@ -285,16 +314,7 @@ def get_proctrack_type(cluster: str) -> Optional[str]:
 
     ssh_config = get_slurm_ssh_config()
     ssh_config_dict = ssh_config.lookup(cluster)
-    client = slurm.SlurmClient(
-        ssh_config_dict['hostname'],
-        int(ssh_config_dict.get('port', 22)),
-        ssh_config_dict['user'],
-        get_identity_file(ssh_config_dict),
-        ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
-        ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),
-        identities_only=get_identities_only(ssh_config_dict),
-        ssh_certificate_file=get_certificate_file(ssh_config_dict),
-    )
+    client = make_slurm_client_from_config(ssh_config_dict, cluster)
     proctrack_type = client.get_proctrack_type()
 
     if proctrack_type is not None:
@@ -333,17 +353,11 @@ def _check_cluster_feature(
 
     ssh_config = get_slurm_ssh_config()
     ssh_config_dict = ssh_config.lookup(cluster)
-    client = slurm.SlurmClient(
-        ssh_config_dict['hostname'],
-        int(ssh_config_dict.get('port', 22)),
-        ssh_config_dict['user'],
-        get_identity_file(ssh_config_dict),
-        ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
-        ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),
-        identities_only=get_identities_only(ssh_config_dict),
-        ssh_certificate_file=get_certificate_file(ssh_config_dict),
-        # Feature checks are background probes that should fail fast,
-        # not wait for interactive authentication.
+    # Feature checks are background probes that should fail fast,
+    # not wait for interactive authentication.
+    client = make_slurm_client_from_config(
+        ssh_config_dict,
+        cluster,
         enable_interactive_auth=False,
     )
     enabled = check_fn(client)
@@ -573,16 +587,7 @@ def get_cluster_default_partition(cluster_name: str) -> Optional[str]:
             f'Failed to load SSH configuration from {DEFAULT_SLURM_PATH}: '
             f'{common_utils.format_exception(e)}') from e
 
-    client = slurm.SlurmClient(
-        ssh_config_dict['hostname'],
-        int(ssh_config_dict.get('port', 22)),
-        ssh_config_dict['user'],
-        get_identity_file(ssh_config_dict),
-        ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
-        ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),
-        identities_only=get_identities_only(ssh_config_dict),
-        ssh_certificate_file=get_certificate_file(ssh_config_dict),
-    )
+    client = make_slurm_client_from_config(ssh_config_dict, cluster_name)
 
     return client.get_default_partition()
 
@@ -986,16 +991,8 @@ def _get_slurm_node_info_list(
         slurm_cluster_name = slurm_cluster_names[0]
     slurm_config_dict = slurm_config.lookup(slurm_cluster_name)
     logger.debug(f'Slurm config dict: {slurm_config_dict}')
-    slurm_client = slurm.SlurmClient(
-        slurm_config_dict['hostname'],
-        int(slurm_config_dict.get('port', 22)),
-        slurm_config_dict['user'],
-        get_identity_file(slurm_config_dict),
-        ssh_proxy_command=slurm_config_dict.get('proxycommand', None),
-        ssh_proxy_jump=slurm_config_dict.get('proxyjump', None),
-        identities_only=get_identities_only(slurm_config_dict),
-        ssh_certificate_file=get_certificate_file(slurm_config_dict),
-    )
+    slurm_client = make_slurm_client_from_config(slurm_config_dict,
+                                                 slurm_cluster_name)
     node_infos = slurm_client.info_nodes()
 
     if not node_infos:
@@ -1139,30 +1136,7 @@ def get_partition_infos(cluster_name: str) -> Dict[str, slurm.SlurmPartition]:
         slurm_config = SSHConfig.from_path(
             os.path.expanduser(DEFAULT_SLURM_PATH))
         slurm_config_dict = slurm_config.lookup(cluster_name)
-
-        ssh_user = slurm_config_dict.get('user')
-        proxy_jump = slurm_config_dict.get('proxyjump')
-        if not ssh_user:
-            user_hash = os.environ.get(constants.USER_ID_ENV_VAR, '')
-            creds = peek_credentials(user_hash, cluster_name)
-            if creds:
-                ssh_user = creds.get('ssh_user')
-                proxy_jump = proxy_jump or creds.get('proxy_jump')
-        if not ssh_user:
-            logger.debug('No SSH user for cluster %s', cluster_name)
-            return {}
-
-        client = slurm.SlurmClient(
-            slurm_config_dict['hostname'],
-            int(slurm_config_dict.get('port', 22)),
-            ssh_user,
-            get_identity_file(slurm_config_dict),
-            ssh_proxy_command=slurm_config_dict.get('proxycommand', None),
-            ssh_proxy_jump=proxy_jump,
-            identities_only=get_identities_only(slurm_config_dict),
-            ssh_certificate_file=get_certificate_file(slurm_config_dict),
-        )
-
+        client = make_slurm_client_from_config(slurm_config_dict, cluster_name)
         partitions_info = client.get_partitions_info()
     except Exception as e:  # pylint: disable=broad-except
         raise ValueError(

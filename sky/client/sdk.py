@@ -416,9 +416,12 @@ def optimize(
     """
     dag_str = dag_utils.dump_dag_to_yaml_str(dag)
 
+    slurm_credentials = _get_slurm_credentials_if_remote()
+
     body = payloads.OptimizeBody(dag=dag_str,
                                  minimize=minimize,
-                                 request_options=admin_policy_request_options)
+                                 request_options=admin_policy_request_options,
+                                 slurm_credentials=slurm_credentials)
     response = server_common.make_authenticated_request(
         'POST', '/optimize', json=json.loads(body.model_dump_json()))
     return server_common.get_request_id(response)

@@ -204,7 +204,11 @@ class TestTokenRejection:
         import urllib.error
         import urllib.request
         url = f'http://127.0.0.1:{mini_server}/slurm/tasks/fake-cluster'
-        req = urllib.request.Request(url, headers={'X-Slurm-Token': 'wrong'})
+        req = urllib.request.Request(url,
+                                     headers={
+                                         'X-Slurm-Token': 'wrong',
+                                         'X-Slurm-Nonce': 'dummy',
+                                     })
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(req, timeout=5)
         assert exc_info.value.code == 401

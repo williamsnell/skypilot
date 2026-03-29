@@ -1132,8 +1132,8 @@ def query_instances(
 
     ssh_config_dict = provider_config['ssh']
     ssh_host = ssh_config_dict['hostname']
-    ssh_port = int(ssh_config_dict['port'])
-    ssh_user = ssh_config_dict['user']
+    ssh_port = int(ssh_config_dict.get('port', 22))
+    ssh_user = ssh_config_dict.get('user')
     ssh_key = ssh_config_dict.get('private_key', None)
     ssh_proxy_command = ssh_config_dict.get('proxycommand', None)
     ssh_proxy_jump = ssh_config_dict.get('proxyjump', None)
@@ -1234,8 +1234,8 @@ def get_cluster_info(
     # https://slurm.schedmd.com/multi_cluster.html.
     ssh_config_dict = provider_config['ssh']
     ssh_host = ssh_config_dict['hostname']
-    ssh_port = int(ssh_config_dict['port'])
-    ssh_user = ssh_config_dict['user']
+    ssh_port = int(ssh_config_dict.get('port', 22))
+    ssh_user = ssh_config_dict.get('user')
     ssh_key = ssh_config_dict.get('private_key', None)
     ssh_proxy_command = ssh_config_dict.get('proxycommand', None)
     ssh_proxy_jump = ssh_config_dict.get('proxyjump', None)
@@ -1489,7 +1489,7 @@ def get_command_runners(
     login_node_ssh_config = provider_config['ssh']
     login_node_ssh_hostname = login_node_ssh_config['hostname']
     login_node_ssh_port = int(login_node_ssh_config.get('port', 22))
-    login_node_ssh_user = login_node_ssh_config['user']
+    login_node_ssh_user = login_node_ssh_config.get('user')
     login_node_ssh_private_key = login_node_ssh_config.get('private_key', None)
     login_node_ssh_proxy_command = login_node_ssh_config.get(
         'proxycommand', None)

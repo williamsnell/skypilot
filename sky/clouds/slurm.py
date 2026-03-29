@@ -11,7 +11,6 @@ from sky import clouds
 from sky import exceptions
 from sky import sky_logging
 from sky import skypilot_config
-from sky.adaptors import slurm
 from sky.provision.slurm import utils as slurm_utils
 from sky.server.slurm_task_queue import peek_credentials
 from sky.skylet import constants
@@ -703,20 +702,8 @@ class Slurm(clouds.Cloud):
                         'sent from client on launch.')
                     success = True
                     continue
-                proxy_jump = (ssh_config_dict.get('proxyjump') or
-                              _get_stashed_credential(cluster, 'proxy_jump'))
-                client = slurm.SlurmClient(
-                    ssh_config_dict['hostname'],
-                    int(ssh_config_dict.get('port', 22)),
-                    ssh_user,
-                    slurm_utils.get_identity_file(ssh_config_dict),
-                    ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
-                    ssh_proxy_jump=proxy_jump,
-                    identities_only=slurm_utils.get_identities_only(
-                        ssh_config_dict),
-                    ssh_certificate_file=slurm_utils.get_certificate_file(
-                        ssh_config_dict),
-                )
+                client = slurm_utils.make_slurm_client_from_config(
+                    ssh_config_dict, cluster)
                 info = client.info()
                 logger.debug(f'Slurm cluster {cluster} sinfo: {info}')
                 # Check if the working directory is on a shared filesystem.

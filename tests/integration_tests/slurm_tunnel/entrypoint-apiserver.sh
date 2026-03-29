@@ -18,9 +18,6 @@ cat > /root/.sky/slurm/config << 'SLURM_CONFIG'
 Host test-cluster
     Hostname slurmctld
     Port 22
-    User root
-    IdentityFile ~/.ssh/skypilot_test
-    IdentitiesOnly yes
     ContainerRuntime podman-hpc
 SLURM_CONFIG
 
