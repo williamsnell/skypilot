@@ -17,6 +17,9 @@ from sky.adaptors import slurm
 from sky.provision import common
 from sky.provision import constants
 from sky.provision.slurm import utils as slurm_utils
+from sky.server import common as server_common
+from sky.server.slurm_task_queue import get_task_queue
+from sky.server.slurm_task_queue import pop_credentials
 from sky.skylet import constants as skylet_constants
 from sky.utils import command_runner
 from sky.utils import common_utils
@@ -262,14 +265,17 @@ def _sbatch_keep_alive_block(
     sky_cluster_home_dir: str,
     skypilot_runtime_dir: str,
     cluster_name_on_cloud: str,
+    poll_token: Optional[str] = None,
+    poll_pubkey_b64: Optional[str] = None,
+    api_server_url: Optional[str] = None,
 ) -> str:
     """Build the block that keeps the sbatch job alive.
 
     For most cases, this is just `sleep infinity` or `wait`.
     For podman-hpc with proctrack/cgroup, the batch step also launches
-    the Skylet: processes started via srun steps get killed by cgroup
-    cleanup, but processes started from the batch step survive for the
-    lifetime of the job.
+    the Skylet and the poll worker: processes started via srun steps
+    get killed by cgroup cleanup, but processes started from the batch
+    step survive for the lifetime of the job.
     """
     if container_image is None:
         return 'sleep infinity'
@@ -291,8 +297,6 @@ def _sbatch_keep_alive_block(
     # container. Both run from the batch step's cgroup so they survive
     # srun step cleanup. Dropbear persists for the job lifetime, so SSH
     # sessions (and their children like tmux/nohup) also survive.
-    # No .bashrc/.profile hacks needed — the runtime dir is mounted as
-    # /root, so HOME=/root gives the right paths automatically.
     auth_keys_src = f'{sky_cluster_home_dir}/.ssh/authorized_keys'
     dropbear_port = slurm_utils.PODMAN_HPC_DROPBEAR_PORT
     setup_and_dropbear_cmd = (
@@ -301,6 +305,28 @@ def _sbatch_keep_alive_block(
         f'chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && '
         f'DROPBEAR=$(command -v dropbear) && '
         f'"$DROPBEAR" -F -s -R -p 127.0.0.1:{dropbear_port}')
+
+    # Build poll worker launch block (if token + key available).
+    poll_worker_block = ''
+    if poll_token and poll_pubkey_b64 and api_server_url:
+        pubkey_file = f'{sky_cluster_home_dir}/.sky/.server_pubkey'
+        poll_worker_cmd = (
+            f'source {skypilot_runtime_dir}/skypilot-runtime/bin/activate && '
+            f'export HOME={sky_cluster_home_dir} && '
+            f'export SKYPILOT_POLL_TOKEN={shlex.quote(poll_token)} && '
+            f'python -m sky.provision.slurm.poll_worker '
+            f'--api-server-url {shlex.quote(api_server_url)} '
+            f'--cluster-name {shlex.quote(cluster_name_on_cloud)} '
+            f'--server-pubkey-file {pubkey_file}')
+        poll_worker_block = (
+            '# Write server public key for poll worker auth.\n'
+            f'echo {shlex.quote(poll_pubkey_b64)} | '
+            f'base64 -d > {pubkey_file}\n'
+            '# Start poll worker inside the container.\n'
+            f'podman-hpc exec -d {shlex.quote(container_name)} '
+            f'bash -c {shlex.quote(poll_worker_cmd)}\n'
+            'echo "[sbatch] Poll worker started"\n')
+
     return ('# Wait for start_skylet signal, then launch services from\n'
             '# the batch step cgroup (survives srun step cleanup).\n'
             f'while [ ! -f {signal_file} ]; do sleep 1; done\n'
@@ -313,6 +339,7 @@ def _sbatch_keep_alive_block(
             f'podman-hpc exec -d {shlex.quote(container_name)} '
             f'bash -c {shlex.quote(skylet_cmd)}\n'
             f'echo "[sbatch] Skylet started from batch step"\n'
+            f'{poll_worker_block}'
             '# Keep allocation alive.\n'
             'wait')
 
@@ -351,6 +378,46 @@ def _wait_for_job_ready(
         _poll_sleep(poll_interval)
 
 
+def _resolve_ephemeral_ssh_credentials(
+    ssh_key: str,
+    cluster_name: str,
+) -> Tuple[str, Optional[str]]:
+    """Resolve SSH key from ephemeral credentials if local file is missing.
+
+    On a remote API server, the SSH key path from ~/.slurm/config won't
+    exist locally. The client sends key contents in the request payload,
+    which are stashed in server memory. This function pops those
+    credentials and writes them to temp files.
+
+    Returns:
+        (ssh_key_path, certificate_path) — the key path is updated to the
+        temp file if credentials were found, otherwise returned unchanged.
+        certificate_path is None if no certificate was stashed.
+    """
+    user_hash = os.environ.get(skylet_constants.USER_ID_ENV_VAR, '')
+    creds = pop_credentials(user_hash, cluster_name)
+    if not creds or not creds.get('private_key_content'):
+        return ssh_key, None
+
+    private_key_content = creds['private_key_content']
+    assert private_key_content is not None  # Checked above via .get()
+    key_fd, key_path = tempfile.mkstemp(prefix='skypilot_key_', suffix='.pem')
+    with os.fdopen(key_fd, 'w') as f:
+        f.write(private_key_content)
+    os.chmod(key_path, 0o600)
+    logger.debug('Using ephemeral SSH key for %s', cluster_name)
+
+    cert_path = None
+    cert_content = creds.get('certificate_content')
+    if cert_content:
+        cert_fd, cert_path = tempfile.mkstemp(prefix='skypilot_cert_',
+                                              suffix='.pub')
+        with os.fdopen(cert_fd, 'w') as f:
+            f.write(cert_content)
+
+    return key_path, cert_path
+
+
 @timeline.event
 def _create_virtual_instance(
         region: str, cluster_name: str, cluster_name_on_cloud: str,
@@ -370,6 +437,31 @@ def _create_virtual_instance(
     ssh_proxy_jump = ssh_config_dict.get('proxyjump', None)
     identities_only = ssh_config_dict.get('identities_only', False)
     ssh_certificate_file = ssh_config_dict.get('certificate_file', None)
+
+    # If the key path doesn't exist locally (remote API server), check for
+    # ephemeral credentials sent by the client. Write to temp files that
+    # persist for the full launch duration (workdir sync, setup, etc. all
+    # need them). Cleaned up in terminate_instances() or server restart.
+    if ssh_key and not os.path.exists(os.path.expanduser(ssh_key)):
+        ssh_key, cert_path = _resolve_ephemeral_ssh_credentials(
+            ssh_key, cluster_name)
+        if ssh_key and ssh_key.startswith('/tmp/'):
+            # Update provider_config so downstream SSH operations
+            # (workdir sync, file mounts) use the ephemeral key.
+            ssh_config_dict['private_key'] = ssh_key
+            if cert_path:
+                ssh_certificate_file = cert_path
+                ssh_config_dict['certificate_file'] = cert_path
+            # Track temp files for cleanup on teardown.
+            paths = [ssh_key]
+            if cert_path:
+                paths.append(cert_path)
+            get_task_queue().register_ephemeral_key_files(cluster_name, paths)
+        else:
+            logger.warning(
+                'SSH key %s not found and no ephemeral '
+                'credentials available', ssh_key)
+
     partition = slurm_utils.get_partition_from_config(provider_config)
 
     client = slurm.SlurmClient(
@@ -585,6 +677,26 @@ def _create_virtual_instance(
                 if is_custom_registry:
                     container_image = f'{maybe_domain}#{maybe_path}'
     container_name = slurm_utils.pyxis_container_name(cluster_name_on_cloud)
+
+    # Generate poll token and signing keypair for the poll worker.
+    # The worker uses these to authenticate with the API server and
+    # verify that tasks are genuinely from this server.
+    poll_token = None
+    poll_pubkey_b64 = None
+    api_server_url = None
+    if container_runtime == 'podman-hpc':
+        import base64  # pylint: disable=import-outside-toplevel
+
+        queue = get_task_queue()
+        poll_token = queue.generate_token(cluster_name_on_cloud)
+        queue.store_token(cluster_name_on_cloud, poll_token)
+        pubkey_bytes = queue.generate_keypair(cluster_name_on_cloud)
+        poll_pubkey_b64 = base64.b64encode(pubkey_bytes).decode('ascii')
+        # Get API server URL. On a remote server this is the externally
+        # reachable URL (from SKYPILOT_API_SERVER_ENDPOINT env var or
+        # api_server.endpoint in config). The poll worker on the compute
+        # node must be able to reach this URL.
+        api_server_url = server_common.get_server_url()
 
     # Build custom sbatch directives from user config.
     custom_sbatch_directives = _build_custom_sbatch_directives(
@@ -895,7 +1007,10 @@ touch {sky_cluster_home_dir}/.hushlogin
 {f'touch {ready_signal}' if container_image is None else ''}
 {_sbatch_keep_alive_block(container_image, proctrack_type, container_runtime,
                           sky_cluster_home_dir, skypilot_runtime_dir,
-                          cluster_name_on_cloud)}
+                          cluster_name_on_cloud,
+                          poll_token=poll_token,
+                          poll_pubkey_b64=poll_pubkey_b64,
+                          api_server_url=api_server_url)}
 """
     # fmt: on
     # pylint: enable=line-too-long
@@ -1214,6 +1329,15 @@ def terminate_instances(
         identities_only = ssh_config_dict.get('identities_only', False)
         ssh_certificate_file = ssh_config_dict.get('certificate_file', None)
 
+        # If the key doesn't exist locally (remote API server), check
+        # for ephemeral credentials sent by the client.
+        if (ssh_private_key and
+                not os.path.exists(os.path.expanduser(ssh_private_key))):
+            ssh_private_key, cert_path = (_resolve_ephemeral_ssh_credentials(
+                ssh_private_key, cluster_name_on_cloud))
+            if cert_path:
+                ssh_certificate_file = cert_path
+
         client = slurm.SlurmClient(
             ssh_host,
             ssh_port,
@@ -1260,6 +1384,13 @@ def terminate_instances(
         client.cancel_jobs_by_name(cluster_name_on_cloud,
                                    signal='TERM',
                                    full=True)
+
+    # Clean up poll worker state (tokens, signing keys, pending tasks).
+    try:
+        get_task_queue().cleanup_cluster(cluster_name_on_cloud)
+    except Exception:  # pylint: disable=broad-except
+        logger.debug('Failed to cleanup poll worker state for %s',
+                     cluster_name_on_cloud)
 
 
 def open_ports(

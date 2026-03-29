@@ -1,0 +1,20 @@
+# Test runner container for Slurm tunnel integration tests.
+# Mounts the SkyPilot source, installs it, runs the API server + tests.
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-client \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for fast dependency management
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /skypilot
+
+# Install SkyPilot and test dependencies (source mounted at runtime)
+# This runs at container start, not build time, since source is a volume mount.
+COPY tests/integration_tests/slurm_tunnel/entrypoint-testrunner.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

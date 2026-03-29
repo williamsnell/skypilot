@@ -34,6 +34,7 @@ from sky.client import interactive_utils
 from sky.client import oauth as oauth_lib
 from sky.jobs import scheduler
 from sky.jobs import utils as managed_job_utils
+from sky.provision.slurm import utils as slurm_utils
 from sky.schemas.api import responses
 from sky.server import common as server_common
 from sky.server import constants as server_constants
@@ -710,6 +711,20 @@ def launch(
         )
 
 
+def _get_slurm_credentials_if_remote() -> Optional[Dict[str, Optional[str]]]:
+    """Read Slurm SSH credentials for transmission to a remote API server.
+
+    Returns None if the API server is local, no ~/.slurm/config exists,
+    or no skypilot_* key is configured. Safe to call unconditionally.
+    """
+    if server_common.is_api_server_local():
+        return None
+    try:
+        return slurm_utils.get_slurm_credentials_for_remote()
+    except Exception:  # pylint: disable=broad-except
+        return None
+
+
 def _launch(
     dag: 'sky.Dag',
     cluster_name: str,
@@ -798,6 +813,8 @@ def _launch(
 
     dag_str = dag_utils.dump_dag_to_yaml_str(dag)
 
+    slurm_credentials = _get_slurm_credentials_if_remote()
+
     body = payloads.LaunchBody(
         task=dag_str,
         cluster_name=cluster_name,
@@ -815,6 +832,7 @@ def _launch(
             _is_launched_by_sky_serve_controller),
         disable_controller_check=_disable_controller_check,
         file_mounts_blob_id=file_mounts_blob_id,
+        slurm_credentials=slurm_credentials,
     )
     response = server_common.make_authenticated_request(
         'POST', '/launch', json=json.loads(body.model_dump_json()), timeout=5)
@@ -890,6 +908,9 @@ def exec(  # pylint: disable=redefined-builtin
     dag, file_mounts_blob_id = client_common.upload_mounts_to_api_server(
         dag, workdir_only=True)
     dag_str = dag_utils.dump_dag_to_yaml_str(dag)
+
+    slurm_credentials = _get_slurm_credentials_if_remote()
+
     body = payloads.ExecBody(
         task=dag_str,
         cluster_name=cluster_name,
@@ -897,6 +918,7 @@ def exec(  # pylint: disable=redefined-builtin
         down=down,
         backend=backend.NAME if backend else None,
         file_mounts_blob_id=file_mounts_blob_id,
+        slurm_credentials=slurm_credentials,
     )
 
     response = server_common.make_authenticated_request(
@@ -1301,11 +1323,14 @@ def down(
     if graceful and version is not None and version < 32:
         logger.warning('`--graceful` is ignored because the server does '
                        'not support it yet.')
+    slurm_credentials = _get_slurm_credentials_if_remote()
+
     body = payloads.StopOrDownBody(
         cluster_name=cluster_name,
         purge=purge,
         graceful=graceful,
         graceful_timeout=graceful_timeout,
+        slurm_credentials=slurm_credentials,
     )
     response = server_common.make_authenticated_request(
         'POST', '/down', json=json.loads(body.model_dump_json()), timeout=5)

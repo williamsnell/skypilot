@@ -28,7 +28,8 @@ def proxyjump_to_proxycommand(
     ssh_log_file: Optional[str] = ...,
     ssh_private_key: Optional[str] = ...,
     ssh_certificate_file: Optional[str] = ...,
-) -> str: ...
+) -> str:
+    ...
 
 
 def ssh_options_list(

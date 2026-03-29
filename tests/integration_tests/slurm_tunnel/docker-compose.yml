@@ -1,0 +1,226 @@
+# Slurm cluster + test infrastructure for poll-based task queue.
+#
+# Based on giovtorres/slurm-docker-cluster, pinned to 25.11.2-2.1.0.
+#
+# Two test profiles:
+#   "test"   — in-process mini server (fast, unit-level integration)
+#   "remote" — real SkyPilot API server container (full architecture)
+#
+# Usage (in-process tests):
+#   podman compose -f docker-compose.yml up -d --build
+#   podman compose -f docker-compose.yml --profile test run --rm testrunner \
+#       python -m pytest tests/integration_tests/slurm_tunnel/test_tunnel_integration.py -v
+#
+# Usage (remote API server tests):
+#   podman compose -f docker-compose.yml --profile remote up -d --build
+#   podman compose -f docker-compose.yml --profile remote run --rm testrunner-remote \
+#       python -m pytest tests/integration_tests/slurm_tunnel/test_remote_api.py -v
+#
+# Cleanup:
+#   podman compose -f docker-compose.yml --profile remote down -v
+#
+# Network topology (remote profile):
+#
+#   slurm_internal:  mysql, slurmdbd, slurmctld, cpu-workers
+#                    (Slurm cluster internals — munge, slurmd, slurmctld)
+#
+#   login_api:       slurmctld, api-server
+#                    (SSH provisioning — API server can sbatch via login node.
+#                     Simulates temporary SSH access that expires after provisioning.)
+#
+#   poll_net:        api-server, cpu-workers, testrunner-remote
+#                    (HTTP polling — poll workers on compute nodes reach the
+#                     API server. testrunner-remote acts as client.)
+#
+#   Enforced constraints:
+#     - API server CANNOT reach cpu-workers directly (not on slurm_internal)
+#     - cpu-workers CANNOT be SSHed into by the API server
+#     - testrunner-remote CANNOT reach slurmctld or cpu-workers
+#     - After provisioning, SSH creds are revoked on slurmctld to prove
+#       the system works without persistent SSH access
+
+services:
+  mysql:
+    image: mariadb:12
+    hostname: mysql
+    environment:
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+      MYSQL_DATABASE: slurm_acct_db
+      MYSQL_USER: slurm
+      MYSQL_PASSWORD: password
+    volumes:
+      - var_lib_mysql:/var/lib/mysql
+    networks:
+      - slurm_internal
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  slurmdbd:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: ["slurmdbd"]
+    hostname: slurmdbd
+    environment:
+      MYSQL_USER: slurm
+      MYSQL_PASSWORD: password
+    volumes:
+      - etc_munge:/etc/munge
+      - etc_slurm:/etc/slurm
+      - var_log_slurm:/var/log/slurm
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - slurm_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pidof slurmdbd"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  slurmctld:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: ["slurmctld"]
+    hostname: slurmctld
+    privileged: true
+    environment:
+      SSH_ENABLE: "true"
+    volumes:
+      - etc_munge:/etc/munge:z
+      - etc_slurm:/etc/slurm:z
+      - slurm_jobdir:/data:z
+      - var_log_slurm:/var/log/slurm:z
+      - ./.test_keys/id_ed25519.pub:/tmp/authorized_keys_host:ro,z
+    depends_on:
+      slurmdbd:
+        condition: service_healthy
+    networks:
+      - slurm_internal
+      # login_api: API server SSHes here for provisioning
+      - login_api
+    healthcheck:
+      test: ["CMD-SHELL", "scontrol ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  cpu-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: ["slurmd-cpu"]
+    privileged: true
+    environment:
+      COMPOSE_PROJECT_NAME: slurm_tunnel
+      PYTHONPATH: /skypilot
+    volumes:
+      - etc_munge:/etc/munge
+      - etc_slurm:/etc/slurm
+      - slurm_jobdir:/data
+      - var_log_slurm:/var/log/slurm
+      # SkyPilot source — poll worker needs sky.provision.slurm.poll_worker
+      - ../../..:/skypilot:ro,z
+    depends_on:
+      slurmctld:
+        condition: service_healthy
+    networks:
+      - slurm_internal
+      # poll_net: poll worker reaches API server via HTTP
+      - poll_net
+    healthcheck:
+      test: ["CMD-SHELL", "pidof slurmd"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      replicas: 2
+
+  # ---- In-process test profile ----
+  testrunner:
+    build:
+      context: ../../..
+      dockerfile: tests/integration_tests/slurm_tunnel/Dockerfile.testrunner
+    hostname: testrunner
+    environment:
+      SLURM_TUNNEL_TEST_CONTAINER: "1"
+    volumes:
+      - ../../..:/skypilot:z
+    depends_on:
+      slurmctld:
+        condition: service_healthy
+    networks:
+      - slurm_internal
+    profiles: ["test"]
+
+  # ---- Remote API server test profile ----
+
+  api-server:
+    build:
+      context: ../../..
+      dockerfile: tests/integration_tests/slurm_tunnel/Dockerfile.apiserver
+    hostname: api-server
+    environment:
+      SKYPILOT_DEV: "1"
+      SKYPILOT_API_SERVER_ENDPOINT: "http://api-server:46580"
+    volumes:
+      - ../../..:/skypilot:z
+      - ./.test_keys:/tmp/test_keys:ro,z
+    depends_on:
+      slurmctld:
+        condition: service_healthy
+    networks:
+      # login_api: SSH to slurmctld for provisioning
+      - login_api
+      # poll_net: poll workers + test client connect here
+      - poll_net
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:46580/api/health\")'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    profiles: ["remote"]
+
+  testrunner-remote:
+    build:
+      context: ../../..
+      dockerfile: tests/integration_tests/slurm_tunnel/Dockerfile.testrunner
+    hostname: testrunner-remote
+    environment:
+      SLURM_TUNNEL_TEST_CONTAINER: "1"
+      SKYPILOT_REMOTE_API_URL: "http://api-server:46580"
+    volumes:
+      - ../../..:/skypilot:z
+      - ./.test_keys:/tmp/test_keys:ro,z
+    depends_on:
+      api-server:
+        condition: service_healthy
+    networks:
+      # Only poll_net — cannot reach slurmctld or cpu-workers directly.
+      - poll_net
+    profiles: ["remote"]
+
+volumes:
+  var_lib_mysql:
+  etc_munge:
+  etc_slurm:
+  slurm_jobdir:
+  var_log_slurm:
+
+networks:
+  # Slurm cluster internals (munge, slurmd ↔ slurmctld)
+  slurm_internal:
+  # API server ↔ login node (SSH, temporary access)
+  login_api:
+  # API server ↔ cpu-workers + testrunner (HTTP polling)
+  poll_net:

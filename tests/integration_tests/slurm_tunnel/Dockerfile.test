@@ -1,0 +1,33 @@
+# Thin overlay on the slurm-docker-cluster image for testing.
+# Adds SSH key-based auth, Dropbear, and a mock podman-hpc.
+# Pinned by digest to avoid tag mutation.
+# Tag: 25.11.2-2.1.0, pushed 2026-03-12
+FROM giovtorres/slurm-docker-cluster@sha256:35d0cb44f60e27e3dd7938903a0726f842d1629886e036d0f9d9a7c42e06ba81
+
+# Install Dropbear + Python 3.11 (for poll worker on compute nodes)
+RUN dnf -y install epel-release && \
+    dnf -y install dropbear python3.11 python3.11-pip && \
+    dnf clean all && \
+    python3.11 -m ensurepip && \
+    python3.11 -m pip install --quiet cryptography
+
+# Add the shared test public key for passwordless access.
+# Generate keys first with: bash setup_keys.sh
+COPY .test_keys/id_ed25519.pub /root/.ssh/authorized_keys
+RUN chmod 600 /root/.ssh/authorized_keys && chmod 700 /root/.ssh
+
+# Install mock podman-hpc so the full code path is exercised.
+COPY mock-podman-hpc.sh /usr/local/bin/podman-hpc
+RUN chmod +x /usr/local/bin/podman-hpc
+
+# Fix multi-network replica detection. The base entrypoint's
+# detect_replica_number compares the resolved container IP against only
+# the first IP from `hostname -i`. With multiple docker networks, a
+# container has multiple IPs and the first may be from the wrong network.
+# Patch to check ALL our IPs so it works regardless of network ordering.
+RUN sed -i \
+    "s/my_ip=\$(hostname -i 2>\/dev\/null | awk '{print \$1}')/my_ips=\$(hostname -i 2>\/dev\/null)/" \
+    /usr/local/bin/docker-entrypoint.sh && \
+    sed -i \
+    's/\[ "$resolved" = "$my_ip" \]/echo "$my_ips" | grep -qw "$resolved"/' \
+    /usr/local/bin/docker-entrypoint.sh

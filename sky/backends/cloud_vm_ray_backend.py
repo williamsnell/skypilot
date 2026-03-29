@@ -57,6 +57,8 @@ from sky.provision.kubernetes import utils as kubernetes_utils
 from sky.provision.slurm import utils as slurm_utils
 from sky.serve import constants as serve_constants
 from sky.server.requests import requests as requests_lib
+from sky.server.slurm_task_queue import get_task_queue
+from sky.server.slurm_task_queue import TaskType
 from sky.skylet import autostop_lib
 from sky.skylet import constants
 from sky.skylet import job_lib
@@ -3718,6 +3720,20 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                             list(resource.accelerators.values())[0])
         return 0
 
+    def _wait_for_poll_worker(self,
+                              cluster_name: str,
+                              timeout: float = 120.0) -> None:
+        """Block until the poll worker sends its first heartbeat."""
+        queue = get_task_queue()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if queue.is_worker_online(cluster_name):
+                return
+            time.sleep(2)
+        raise RuntimeError(
+            f'Poll worker for {cluster_name} did not come online '
+            f'within {timeout}s')
+
     def _setup(self, handle: CloudVmRayResourceHandle, task: task_lib.Task,
                detach_setup: bool) -> None:
 
@@ -3726,6 +3742,14 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         if task.setup is None:
             return
         setup = task.setup
+
+        # For podman-hpc, deliver setup via poll-based task queue instead
+        # of SSH. The poll worker running in the container picks up the
+        # task, executes it, and reports back.
+        if handle.is_slurm_podman_hpc():
+            self._setup_via_poll(handle, task, setup, detach_setup)
+            return
+
         # Sync the setup script up and run it.
         internal_ips = handle.internal_ips()
         remote_setup_file_name = f'/tmp/sky_setup_{self.run_timestamp}'
@@ -3869,6 +3893,134 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         logger.info(
             ux_utils.finishing_message('Setup completed.', setup_log_path))
 
+    def _setup_via_poll(self, handle: CloudVmRayResourceHandle,
+                        task: task_lib.Task, setup: str,
+                        detach_setup: bool) -> None:
+        """Run setup via poll-based task queue (podman-hpc path)."""
+        start = time.time()
+        cluster_name = handle.cluster_name_on_cloud
+        queue = get_task_queue()
+
+        logger.info('Waiting for poll worker to come online...')
+        self._wait_for_poll_worker(cluster_name)
+
+        internal_ips = handle.internal_ips()
+        setup_envs = task_lib.get_plaintext_envs_and_secrets(
+            task.envs_and_secrets)
+        setup_envs.update(self._skypilot_predefined_env_vars(handle))
+        setup_envs['SKYPILOT_SETUP_NODE_IPS'] = '\n'.join(internal_ips)
+        setup_envs['SKYPILOT_SETUP_NODE_RANK'] = '0'
+        setup_envs[constants.SKYPILOT_SETUP_NUM_GPUS_PER_NODE] = (str(
+            self._get_num_gpus(task)))
+
+        setup_script = log_lib.make_task_bash_script(setup, env_vars=setup_envs)
+
+        if detach_setup:
+            # Write the setup script to the remote node via poll queue,
+            # so the later codegen-based execution finds it at the
+            # expected path (mirrors _dump_final_script in the regular
+            # _setup path which uses rsync).
+            remote_setup_file = (f'/tmp/sky_setup_'
+                                 f'{self.run_timestamp}')
+            write_cmd = (
+                f'cat > {remote_setup_file} '
+                f"<< 'SKYPILOT_SETUP_EOF'\n"  # pylint: disable=invalid-string-quote
+                f'{setup_script}\n'
+                f'SKYPILOT_SETUP_EOF')
+            write_future = queue.enqueue_task(cluster_name, TaskType.SETUP,
+                                              write_cmd)
+            write_future.result(timeout=60)
+            self._setup_cmd = (f'/bin/bash -i {remote_setup_file}'
+                               f' 2>&1')
+            logger.info(ux_utils.finishing_message('Setup detached.'))
+            return
+
+        logger.info(ux_utils.starting_message('Running setup on 1 VM.'))
+
+        future = queue.enqueue_task(cluster_name,
+                                    TaskType.SETUP,
+                                    setup_script,
+                                    env_vars=setup_envs)
+
+        try:
+            exit_code, stdout, stderr = future.result(timeout=3600)
+        except Exception as e:
+            raise RuntimeError(
+                f'Setup task failed for {cluster_name}: {e}') from e
+
+        setup_log_path = os.path.join(self.log_dir, 'setup-0.log')
+        os.makedirs(os.path.expanduser(self.log_dir), exist_ok=True)
+        with open(os.path.expanduser(setup_log_path), 'w',
+                  encoding='utf-8') as f:
+            f.write(stdout)
+            if stderr:
+                f.write('\n--- stderr ---\n')
+                f.write(stderr)
+
+        if exit_code != 0:
+            last_lines = '\n'.join(stdout.split('\n')[-10:])
+            err_msg = (f'Failed to setup with return code {exit_code}. '
+                       f'Check the details in log: {setup_log_path}')
+            if last_lines:
+                err_msg += (f'\n\n{colorama.Fore.RED}'
+                            '****** START Last lines of setup output ******'
+                            f'{colorama.Style.RESET_ALL}\n'
+                            f'{last_lines}'
+                            f'{colorama.Fore.RED}'
+                            '******* END Last lines of setup output *******'
+                            f'{colorama.Style.RESET_ALL}')
+            raise RuntimeError(err_msg)
+
+        end = time.time()
+        logger.debug(f'Setup via poll took {end - start} seconds.')
+        logger.info(
+            ux_utils.finishing_message('Setup completed.', setup_log_path))
+
+    def _exec_code_via_poll(self, handle: CloudVmRayResourceHandle,
+                            codegen: str, job_id: int,
+                            remote_log_dir: str) -> None:
+        """Submit job codegen via poll-based task queue (podman-hpc path).
+
+        The codegen script writes itself to a file, then calls
+        job_lib.scheduler.queue() to submit to Skylet's local scheduler.
+        The poll worker just executes this wrapper script.
+        """
+        cluster_name = handle.cluster_name_on_cloud
+        queue = get_task_queue()
+
+        file_name = f'sky_job_{job_id}'
+        script_path = os.path.join(SKY_REMOTE_APP_DIR, file_name)
+        remote_log_path = os.path.join(remote_log_dir, 'run.log')
+
+        mkdir_code = (f'mkdir -p {remote_log_dir} && '
+                      f'touch {remote_log_path}')
+        encoded_script = shlex.quote(codegen)
+        create_script_code = (f'{{ echo {encoded_script} > '
+                              f'{script_path}; }}')
+        job_submit_cmd = (f'{job_lib.JOB_CMD_IDENTIFIER.format(job_id)} && '
+                          f'{constants.SKY_PYTHON_CMD} -u {script_path} '
+                          f'> {remote_log_path} 2>&1')
+        code = job_lib.JobLibCodeGen.queue_job(job_id, job_submit_cmd)
+
+        # The full script: create dirs, write codegen, queue job.
+        full_script = f'{mkdir_code} && {create_script_code} && {code}'
+
+        future = queue.enqueue_task(cluster_name, TaskType.RUN, full_script)
+
+        try:
+            exit_code, stdout, stderr = future.result(timeout=120)
+        except Exception as e:
+            raise RuntimeError(
+                f'Job submission failed for {cluster_name}: {e}') from e
+
+        if exit_code != 0:
+            output = stdout + stderr
+            backend_utils.check_stale_runtime_on_remote(exit_code, stderr,
+                                                        handle.cluster_name)
+            raise RuntimeError(
+                f'Failed to submit job {job_id} via poll worker: '
+                f'exit_code={exit_code}\n{output}')
+
     def _download_file(self, handle: CloudVmRayResourceHandle,
                        local_file_path: str, remote_file_path: str) -> None:
         """Syncs file from remote to local."""
@@ -3891,11 +4043,17 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         remote_log_dir: Optional[str] = None,
     ) -> None:
         """Executes generated code on the head node."""
+        if remote_log_dir is None:
+            remote_log_dir = self.log_dir
+
+        # For podman-hpc, deliver job submission via poll-based task queue.
+        if handle.is_slurm_podman_hpc():
+            self._exec_code_via_poll(handle, codegen, job_id, remote_log_dir)
+            return
+
         use_legacy = not handle.is_grpc_enabled_with_flag
         file_name = f'sky_job_{job_id}'
         script_path = os.path.join(SKY_REMOTE_APP_DIR, file_name)
-        if remote_log_dir is None:
-            remote_log_dir = self.log_dir
         remote_log_path = os.path.join(remote_log_dir, 'run.log')
 
         def _dump_code_to_file(codegen: str,
@@ -3907,21 +4065,12 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 # We choose to sync code + exec, because the alternative of
                 # 'ray submit' may not work as it may use system python
                 # (python2) to execute the script. Happens for AWS.
-                # For podman-hpc, rsync through the container SSH runner
-                # so files land at /root/.sky/sky_app/ (runtime dir mount).
-                if handle.is_slurm_podman_hpc():
-                    container_runner = handle.get_container_ssh_runner()
-                    container_runner.rsync(source=fp.name,
-                                           target=script_path,
-                                           up=True,
-                                           stream_logs=False)
-                else:
-                    runners = handle.get_command_runners()
-                    head_runner = runners[0]
-                    head_runner.rsync_driver(source=fp.name,
-                                             target=script_path,
-                                             up=True,
-                                             stream_logs=False)
+                runners = handle.get_command_runners()
+                head_runner = runners[0]
+                head_runner.rsync_driver(source=fp.name,
+                                         target=script_path,
+                                         up=True,
+                                         stream_logs=False)
 
         mkdir_code = f'mkdir -p {remote_log_dir} && touch {remote_log_path}'
         encoded_script = shlex.quote(codegen)
@@ -4024,11 +4173,7 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 use_legacy = True
 
         if use_legacy:
-            # For podman-hpc, always dump to file — the Dropbear SSH
-            # path has an ~8KB command length limit (socat buffer).
-            is_podman_hpc = (is_slurm and handle.is_slurm_podman_hpc())
-            if (is_podman_hpc or
-                    backend_utils.is_command_length_over_limit(job_submit_cmd)):
+            if backend_utils.is_command_length_over_limit(job_submit_cmd):
                 _dump_code_to_file(codegen)
                 job_submit_cmd = f'{mkdir_code} && {code}'
 
@@ -5604,28 +5749,22 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         if under_remote_workdir:
             cmd = f'cd {SKY_REMOTE_WORKDIR} && {cmd}'
 
-        # For Slurm+podman-hpc, run_driver() goes through srun on the
-        # host, where nohup'd processes get killed by cgroup cleanup.
-        # Instead, use the Dropbear SSH path into the container — same
-        # pattern as Vast/RunPod where SSH lands inside Docker. Processes
-        # started this way inherit the batch step's cgroup and survive.
+        # For Slurm+podman-hpc, deliver commands via the poll-based task
+        # queue. The poll worker running inside the container picks up the
+        # command and executes it.
         if handle.is_slurm_podman_hpc():
-            container_runner = handle.get_container_ssh_runner()
-            # SSH into the container via Dropbear. The runtime dir is
-            # mounted as /root, so HOME=/root gives the right paths
-            # with no SKY_RUNTIME_DIR needed (same as RunPod/Vast).
-            return container_runner.run(
-                cmd,
-                port_forward=port_forward,
-                log_path=log_path,
-                process_stream=process_stream,
-                stream_logs=stream_logs,
-                ssh_mode=ssh_mode,
-                require_outputs=require_outputs,
-                separate_stderr=separate_stderr,
-                source_bashrc=source_bashrc,
-                **kwargs,
-            )
+            queue = get_task_queue()
+            cluster_name = handle.cluster_name_on_cloud
+            future = queue.enqueue_task(cluster_name, TaskType.RUN, cmd)
+            try:
+                exit_code, stdout, stderr = future.result(timeout=3600)
+            except Exception as e:  # pylint: disable=broad-except
+                if require_outputs:
+                    return 1, '', str(e)
+                return 1
+            if require_outputs:
+                return exit_code, stdout, stderr
+            return exit_code
 
         return head_runner.run_driver(
             cmd,

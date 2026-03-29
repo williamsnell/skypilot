@@ -99,11 +99,96 @@ def get_slurm_ssh_config() -> SSHConfig:
     return slurm_config
 
 
+_SKYPILOT_KEY_PREFIX = 'skypilot_'
+
+
 def get_identity_file(ssh_config_dict: Dict[str, Any]) -> Optional[str]:
     """Get the first identity file from SSH config, or None if not specified."""
     identity_files = ssh_config_dict.get('identityfile')
     if identity_files:
         return identity_files[0]
+    return None
+
+
+def validate_identity_file_for_remote(identity_file: str) -> None:
+    """Validate that the SSH key name starts with 'skypilot_'.
+
+    When transmitting credentials to a remote API server, we require
+    a purpose-built key to limit blast radius if the key is compromised.
+    The key filename must start with 'skypilot_' (e.g. skypilot_isambard).
+    """
+    basename = os.path.basename(identity_file)
+    if not basename.startswith(_SKYPILOT_KEY_PREFIX):
+        raise ValueError(
+            f'SSH key for Slurm must start with {_SKYPILOT_KEY_PREFIX!r} '
+            f'when used with a remote API server (got {basename!r}). '
+            f'Generate a dedicated key with: '
+            f'ssh-keygen -t ed25519 -f ~/.ssh/{_SKYPILOT_KEY_PREFIX}'
+            f'<cluster_name>')
+
+
+def read_credential_contents(
+    identity_file: Optional[str],
+    certificate_file: Optional[str],
+) -> Dict[str, Optional[str]]:
+    """Read SSH key and certificate file contents for remote transmission.
+
+    Validates the key name matches the skypilot_* convention, then reads
+    file contents. Returns a dict with 'private_key_content' and
+    'certificate_content' (either may be None).
+    """
+    result: Dict[str, Optional[str]] = {
+        'private_key_content': None,
+        'certificate_content': None,
+    }
+    if identity_file is None:
+        return result
+
+    expanded = os.path.expanduser(identity_file)
+    validate_identity_file_for_remote(expanded)
+
+    with open(expanded, 'r', encoding='utf-8') as f:
+        result['private_key_content'] = f.read()
+
+    if certificate_file is not None:
+        cert_expanded = os.path.expanduser(certificate_file)
+        with open(cert_expanded, 'r', encoding='utf-8') as f:
+            result['certificate_content'] = f.read()
+
+    return result
+
+
+def get_slurm_credentials_for_remote() -> Optional[Dict[str, Optional[str]]]:
+    """Read Slurm SSH credentials for transmission to a remote API server.
+
+    Returns None if no ~/.slurm/config exists or no skypilot_* key is
+    configured. Safe to call unconditionally — returns None for non-Slurm
+    setups.
+    """
+    try:
+        slurm_config = get_slurm_ssh_config()
+    except (FileNotFoundError, OSError):
+        return None
+
+    # Check all configured clusters for a skypilot_* key.
+    # Use the default ('*') host if no specific cluster is found.
+    for host in list(slurm_config.get_hostnames()) + ['*']:
+        try:
+            ssh_dict = slurm_config.lookup(host)
+        except Exception:  # pylint: disable=broad-except
+            continue
+        identity_file = get_identity_file(ssh_dict)
+        if identity_file is None:
+            continue
+        basename = os.path.basename(os.path.expanduser(identity_file))
+        if not basename.startswith(_SKYPILOT_KEY_PREFIX):
+            continue
+        # Found a skypilot_* key — read its contents.
+        cert_file = get_certificate_file(ssh_dict)
+        try:
+            return read_credential_contents(identity_file, cert_file)
+        except (FileNotFoundError, ValueError):
+            continue
     return None
 
 

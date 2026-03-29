@@ -80,6 +80,7 @@ from sky.server.requests import payloads
 from sky.server.requests import preconditions
 from sky.server.requests import request_names
 from sky.server.requests import requests as requests_lib
+from sky.server.slurm_task_queue import create_poll_router
 from sky.skylet import constants
 from sky.ssh_node_pools import server as ssh_node_pools_rest
 from sky.usage import usage_lib
@@ -2838,6 +2839,12 @@ async def slurm_job_ssh_proxy(websocket: fastapi.WebSocket,
                 await stderr_task
             except asyncio.CancelledError:
                 pass
+
+
+# ---- Slurm poll-based task endpoints ----
+# Defined in slurm_task_queue.create_poll_router() so integration tests
+# exercise the exact same endpoint code as production.
+app.include_router(create_poll_router())
 
 
 @app.websocket('/ssh-interactive-auth')
