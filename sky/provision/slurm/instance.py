@@ -381,7 +381,7 @@ def _wait_for_job_ready(
 def _resolve_ephemeral_ssh_credentials(
     ssh_key: str,
     cluster_name: str,
-) -> Tuple[str, Optional[str]]:
+) -> Tuple[str, Optional[str], Optional[str]]:
     """Resolve SSH key from ephemeral credentials if local file is missing.
 
     On a remote API server, the SSH key path from ~/.slurm/config won't
@@ -390,14 +390,15 @@ def _resolve_ephemeral_ssh_credentials(
     credentials and writes them to temp files.
 
     Returns:
-        (ssh_key_path, certificate_path) — the key path is updated to the
-        temp file if credentials were found, otherwise returned unchanged.
-        certificate_path is None if no certificate was stashed.
+        (ssh_key_path, certificate_path, ssh_user) — the key path is
+        updated to the temp file if credentials were found, otherwise
+        returned unchanged. certificate_path and ssh_user are None if
+        not stashed.
     """
     user_hash = os.environ.get(skylet_constants.USER_ID_ENV_VAR, '')
     creds = pop_credentials(user_hash, cluster_name)
     if not creds or not creds.get('private_key_content'):
-        return ssh_key, None
+        return ssh_key, None, None
 
     private_key_content = creds['private_key_content']
     assert private_key_content is not None  # Checked above via .get()
@@ -415,7 +416,7 @@ def _resolve_ephemeral_ssh_credentials(
         with os.fdopen(cert_fd, 'w') as f:
             f.write(cert_content)
 
-    return key_path, cert_path
+    return key_path, cert_path, creds.get('ssh_user')
 
 
 @timeline.event
@@ -431,7 +432,7 @@ def _create_virtual_instance(
     ssh_config_dict = provider_config['ssh']
     ssh_host = ssh_config_dict['hostname']
     ssh_port = int(ssh_config_dict['port'])
-    ssh_user = ssh_config_dict['user']
+    ssh_user = ssh_config_dict.get('user')
     ssh_key = ssh_config_dict.get('private_key', None)
     ssh_proxy_command = ssh_config_dict.get('proxycommand', None)
     ssh_proxy_jump = ssh_config_dict.get('proxyjump', None)
@@ -443,7 +444,7 @@ def _create_virtual_instance(
     # persist for the full launch duration (workdir sync, setup, etc. all
     # need them). Cleaned up in terminate_instances() or server restart.
     if ssh_key and not os.path.exists(os.path.expanduser(ssh_key)):
-        ssh_key, cert_path = _resolve_ephemeral_ssh_credentials(
+        ssh_key, cert_path, cred_user = _resolve_ephemeral_ssh_credentials(
             ssh_key, cluster_name)
         if ssh_key and ssh_key.startswith('/tmp/'):
             # Update provider_config so downstream SSH operations
@@ -452,6 +453,9 @@ def _create_virtual_instance(
             if cert_path:
                 ssh_certificate_file = cert_path
                 ssh_config_dict['certificate_file'] = cert_path
+            if cred_user:
+                ssh_user = cred_user
+                ssh_config_dict['user'] = cred_user
             # Track temp files for cleanup on teardown.
             paths = [ssh_key]
             if cert_path:
@@ -461,6 +465,11 @@ def _create_virtual_instance(
             logger.warning(
                 'SSH key %s not found and no ephemeral '
                 'credentials available', ssh_key)
+
+    if not ssh_user:
+        raise ValueError('SSH user not configured. Set User in the server\'s '
+                         '~/.slurm/config or ensure the client sends ssh_user '
+                         'in credentials.')
 
     partition = slurm_utils.get_partition_from_config(provider_config)
 
@@ -1322,7 +1331,7 @@ def terminate_instances(
         ssh_config_dict = provider_config['ssh']
         ssh_host = ssh_config_dict['hostname']
         ssh_port = int(ssh_config_dict['port'])
-        ssh_user = ssh_config_dict['user']
+        ssh_user = ssh_config_dict.get('user')
         ssh_private_key = ssh_config_dict.get('private_key', None)
         ssh_proxy_command = ssh_config_dict.get('proxycommand', None)
         ssh_proxy_jump = ssh_config_dict.get('proxyjump', None)
@@ -1333,10 +1342,13 @@ def terminate_instances(
         # for ephemeral credentials sent by the client.
         if (ssh_private_key and
                 not os.path.exists(os.path.expanduser(ssh_private_key))):
-            ssh_private_key, cert_path = (_resolve_ephemeral_ssh_credentials(
-                ssh_private_key, cluster_name_on_cloud))
+            ssh_private_key, cert_path, cred_user = (
+                _resolve_ephemeral_ssh_credentials(ssh_private_key,
+                                                   cluster_name_on_cloud))
             if cert_path:
                 ssh_certificate_file = cert_path
+            if cred_user:
+                ssh_user = cred_user
 
         client = slurm.SlurmClient(
             ssh_host,

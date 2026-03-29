@@ -202,8 +202,11 @@ class RequestBody(BasePayload):
         if slurm_creds and slurm_creds.get('private_key_content'):
             cname = kwargs.get('cluster_name', '')
             uhash = self.user_hash or ''
-            stash_credentials(uhash, cname, slurm_creds['private_key_content'],
-                              slurm_creds.get('certificate_content'))
+            stash_credentials(uhash,
+                              cname,
+                              slurm_creds['private_key_content'],
+                              slurm_creds.get('certificate_content'),
+                              ssh_user=slurm_creds.get('ssh_user'))
         return kwargs
 
     @property

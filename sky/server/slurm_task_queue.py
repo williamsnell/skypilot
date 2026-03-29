@@ -458,16 +458,28 @@ _cred_lock = threading.Lock()
 def stash_credentials(user_hash: str,
                       cluster_name: str,
                       private_key_content: str,
-                      certificate_content: Optional[str] = None) -> None:
+                      certificate_content: Optional[str] = None,
+                      ssh_user: Optional[str] = None) -> None:
     """Stash credentials in memory for the provisioner to retrieve."""
     key = (user_hash, cluster_name)
     with _cred_lock:
         _ephemeral_credentials[key] = {
             'private_key_content': private_key_content,
             'certificate_content': certificate_content,
+            'ssh_user': ssh_user,
         }
     logger.info('Stashed ephemeral credentials for user=%s cluster=%s',
                 user_hash[:8], cluster_name)
+
+
+def peek_credentials(
+    user_hash: str,
+    cluster_name: str,
+) -> Optional[Dict[str, Optional[str]]]:
+    """Read credentials without removing them. Returns None if not stashed."""
+    key = (user_hash, cluster_name)
+    with _cred_lock:
+        return _ephemeral_credentials.get(key)
 
 
 def pop_credentials(

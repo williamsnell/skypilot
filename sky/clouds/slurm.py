@@ -1,5 +1,6 @@
 """Slurm."""
 
+import os
 import typing
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
@@ -12,6 +13,7 @@ from sky import sky_logging
 from sky import skypilot_config
 from sky.adaptors import slurm
 from sky.provision.slurm import utils as slurm_utils
+from sky.server.slurm_task_queue import peek_credentials
 from sky.skylet import constants
 from sky.utils import annotations
 from sky.utils import common_utils
@@ -26,6 +28,22 @@ if typing.TYPE_CHECKING:
 logger = sky_logging.init_logger(__name__)
 
 CREDENTIAL_PATH = slurm_utils.DEFAULT_SLURM_PATH
+
+
+def _get_stashed_ssh_user(cluster_name: str) -> Optional[str]:
+    """Get ssh_user from stashed ephemeral credentials (remote API server).
+
+    On a remote API server, the server's ~/.slurm/config may not have a
+    User field. The client sends it via slurm_credentials, and it's
+    stashed in server memory. This peeks (non-destructive) to get the
+    user for template rendering, before the credentials are fully
+    consumed during provisioning.
+    """
+    user_hash = os.environ.get(constants.USER_ID_ENV_VAR, '')
+    creds = peek_credentials(user_hash, cluster_name)
+    if creds:
+        return creds.get('ssh_user')
+    return None
 
 
 @registry.CLOUD_REGISTRY.register
@@ -528,7 +546,8 @@ class Slurm(clouds.Cloud):
             # TODO(jwj): Pass SSH config in a smarter way
             'ssh_hostname': ssh_config_dict['hostname'],
             'ssh_port': str(ssh_config_dict.get('port', 22)),
-            'ssh_user': ssh_config_dict['user'],
+            'ssh_user': ssh_config_dict.get('user')
+                        or _get_stashed_ssh_user(cluster),
             'slurm_proxy_command': ssh_config_dict.get('proxycommand', None),
             'slurm_proxy_jump': ssh_config_dict.get('proxyjump', None),
             'slurm_identities_only':
@@ -668,10 +687,14 @@ class Slurm(clouds.Cloud):
             # Retrieve the config options for a given SlurmctldHost name alias.
             ssh_config_dict = ssh_config.lookup(cluster)
             try:
+                ssh_user = (ssh_config_dict.get('user') or
+                            _get_stashed_ssh_user(cluster))
+                if not ssh_user:
+                    raise KeyError('user')
                 client = slurm.SlurmClient(
                     ssh_config_dict['hostname'],
                     int(ssh_config_dict.get('port', 22)),
-                    ssh_config_dict['user'],
+                    ssh_user,
                     slurm_utils.get_identity_file(ssh_config_dict),
                     ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
                     ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),

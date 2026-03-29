@@ -186,7 +186,9 @@ def get_slurm_credentials_for_remote() -> Optional[Dict[str, Optional[str]]]:
         # Found a skypilot_* key — read its contents.
         cert_file = get_certificate_file(ssh_dict)
         try:
-            return read_credential_contents(identity_file, cert_file)
+            result = read_credential_contents(identity_file, cert_file)
+            result['ssh_user'] = ssh_dict.get('user')
+            return result
         except (FileNotFoundError, ValueError):
             continue
     return None
