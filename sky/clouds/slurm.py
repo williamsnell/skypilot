@@ -30,19 +30,19 @@ logger = sky_logging.init_logger(__name__)
 CREDENTIAL_PATH = slurm_utils.DEFAULT_SLURM_PATH
 
 
-def _get_stashed_ssh_user(cluster_name: str) -> Optional[str]:
-    """Get ssh_user from stashed ephemeral credentials (remote API server).
+def _get_stashed_credential(cluster_name: str, field: str) -> Optional[str]:
+    """Get a field from stashed ephemeral credentials (remote API server).
 
-    On a remote API server, the server's ~/.slurm/config may not have a
-    User field. The client sends it via slurm_credentials, and it's
-    stashed in server memory. This peeks (non-destructive) to get the
-    user for template rendering, before the credentials are fully
-    consumed during provisioning.
+    On a remote API server, the server's ~/.sky/slurm/config may not have
+    per-user fields like User or ProxyJump. The client sends these via
+    slurm_credentials, stashed in server memory. This peeks
+    (non-destructive) for template rendering, before the credentials
+    are fully consumed during provisioning.
     """
     user_hash = os.environ.get(constants.USER_ID_ENV_VAR, '')
     creds = peek_credentials(user_hash, cluster_name)
     if creds:
-        return creds.get('ssh_user')
+        return creds.get(field)
     return None
 
 
@@ -74,7 +74,7 @@ class Slurm(clouds.Cloud):
         clouds.CloudImplementationFeatures.DOCKER_IMAGE:
             'Docker image is not supported on this Slurm cluster because '
             'no supported container runtime was found (Pyxis or '
-            'podman-hpc). You can set ContainerRuntime in ~/.slurm/config '
+            'podman-hpc). You can set ContainerRuntime in ~/.sky/slurm/config '
             'or ask your cluster administrator to install one.',
         clouds.CloudImplementationFeatures.STORAGE_MOUNTING:
             'Storage mounting is not supported on this Slurm cluster '
@@ -226,7 +226,7 @@ class Slurm(clouds.Cloud):
         if skipped_clusters:
             logger.warning(
                 f'Slurm clusters {set(skipped_clusters)!r} specified in '
-                '"allowed_clusters" not found in ~/.slurm/config. '
+                '"allowed_clusters" not found in ~/.sky/slurm/config. '
                 'Ignoring these clusters.')
 
     @classmethod
@@ -235,11 +235,11 @@ class Slurm(clouds.Cloud):
 
         Returns clusters based on the following logic:
         1. If 'allowed_clusters' is set to 'all' in ~/.sky/config.yaml,
-           return all clusters from ~/.slurm/config
+           return all clusters from ~/.sky/slurm/config
         2. If specific clusters are listed in 'allowed_clusters',
-           return only those that exist in ~/.slurm/config
+           return only those that exist in ~/.sky/slurm/config
         3. If no configuration is specified, return all clusters
-           from ~/.slurm/config (default behavior)
+           from ~/.sky/slurm/config (default behavior)
         """
         all_clusters = slurm_utils.get_all_slurm_cluster_names()
         if len(all_clusters) == 0:
@@ -546,10 +546,12 @@ class Slurm(clouds.Cloud):
             # TODO(jwj): Pass SSH config in a smarter way
             'ssh_hostname': ssh_config_dict['hostname'],
             'ssh_port': str(ssh_config_dict.get('port', 22)),
-            'ssh_user': ssh_config_dict.get('user')
-                        or _get_stashed_ssh_user(cluster),
+            'ssh_user': (ssh_config_dict.get('user') or
+                         _get_stashed_credential(cluster, 'ssh_user')),
             'slurm_proxy_command': ssh_config_dict.get('proxycommand', None),
-            'slurm_proxy_jump': ssh_config_dict.get('proxyjump', None),
+            'slurm_proxy_jump':
+                (ssh_config_dict.get('proxyjump') or
+                 _get_stashed_credential(cluster, 'proxy_jump')),
             'slurm_identities_only':
                 slurm_utils.get_identities_only(ssh_config_dict),
             # TODO(jwj): Solve naming collision with 'ssh_private_key'.
@@ -677,7 +679,7 @@ class Slurm(clouds.Cloud):
         existing_allowed_clusters = cls.existing_allowed_clusters()
 
         if not existing_allowed_clusters:
-            return (False, 'No Slurm clusters found in ~/.slurm/config. '
+            return (False, 'No Slurm clusters found in ~/.sky/slurm/config. '
                     'Please configure at least one Slurm cluster.')
 
         # Check credentials for each cluster and return ctx2text mapping
@@ -688,16 +690,28 @@ class Slurm(clouds.Cloud):
             ssh_config_dict = ssh_config.lookup(cluster)
             try:
                 ssh_user = (ssh_config_dict.get('user') or
-                            _get_stashed_ssh_user(cluster))
+                            _get_stashed_credential(cluster, 'ssh_user'))
                 if not ssh_user:
-                    raise KeyError('user')
+                    # No user in server config or stashed credentials.
+                    # This is expected on a remote API server where
+                    # per-user credentials are sent with each request.
+                    ctx2text[cluster] = (
+                        f'{colorama.Fore.LIGHTYELLOW_EX}partially enabled'
+                        f'{colorama.Style.RESET_ALL} — '
+                        'User not in server config (expected for '
+                        'remote API server). Credentials will be '
+                        'sent from client on launch.')
+                    success = True
+                    continue
+                proxy_jump = (ssh_config_dict.get('proxyjump') or
+                              _get_stashed_credential(cluster, 'proxy_jump'))
                 client = slurm.SlurmClient(
                     ssh_config_dict['hostname'],
                     int(ssh_config_dict.get('port', 22)),
                     ssh_user,
                     slurm_utils.get_identity_file(ssh_config_dict),
                     ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
-                    ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),
+                    ssh_proxy_jump=proxy_jump,
                     identities_only=slurm_utils.get_identities_only(
                         ssh_config_dict),
                     ssh_certificate_file=slurm_utils.get_certificate_file(
@@ -761,7 +775,7 @@ class Slurm(clouds.Cloud):
                 ctx2text[cluster] = (
                     f'disabled. '
                     f'{cls._SSH_CONFIG_KEY_MAPPING.get(key, key.capitalize())} '
-                    'is missing, please check your ~/.slurm/config '
+                    'is missing, please check your ~/.sky/slurm/config '
                     'and try again.')
             except Exception as e:  # pylint: disable=broad-except
                 error_msg = (f'Credential check failed: '

@@ -11,10 +11,10 @@ uv pip install --system pytest pytest-asyncio uvicorn httpx
 # Set up Slurm SSH config for remote API server credential delivery tests.
 # The key is named skypilot_test to satisfy the skypilot_* validation.
 if [ -f /tmp/test_keys/id_ed25519 ]; then
-    mkdir -p /root/.ssh /root/.slurm
+    mkdir -p /root/.ssh /root/.sky/slurm
     cp /tmp/test_keys/id_ed25519 /root/.ssh/skypilot_test
     chmod 600 /root/.ssh/skypilot_test
-    cat > /root/.slurm/config << 'SLURM_CONFIG'
+    cat > /root/.sky/slurm/config << 'SLURM_CONFIG'
 Host test-cluster
     Hostname slurmctld
     Port 22

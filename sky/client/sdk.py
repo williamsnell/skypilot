@@ -714,7 +714,7 @@ def launch(
 def _get_slurm_credentials_if_remote() -> Optional[Dict[str, Optional[str]]]:
     """Read Slurm SSH credentials for transmission to a remote API server.
 
-    Returns None if the API server is local, no ~/.slurm/config exists,
+    Returns None if the API server is local, no ~/.sky/slurm/config exists,
     or no skypilot_* key is configured. Safe to call unconditionally.
     """
     if server_common.is_api_server_local():

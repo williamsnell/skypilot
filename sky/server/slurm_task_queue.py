@@ -459,7 +459,8 @@ def stash_credentials(user_hash: str,
                       cluster_name: str,
                       private_key_content: str,
                       certificate_content: Optional[str] = None,
-                      ssh_user: Optional[str] = None) -> None:
+                      ssh_user: Optional[str] = None,
+                      proxy_jump: Optional[str] = None) -> None:
     """Stash credentials in memory for the provisioner to retrieve."""
     key = (user_hash, cluster_name)
     with _cred_lock:
@@ -467,6 +468,7 @@ def stash_credentials(user_hash: str,
             'private_key_content': private_key_content,
             'certificate_content': certificate_content,
             'ssh_user': ssh_user,
+            'proxy_jump': proxy_jump,
         }
     logger.info('Stashed ephemeral credentials for user=%s cluster=%s',
                 user_hash[:8], cluster_name)

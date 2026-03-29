@@ -206,7 +206,8 @@ class RequestBody(BasePayload):
                               cname,
                               slurm_creds['private_key_content'],
                               slurm_creds.get('certificate_content'),
-                              ssh_user=slurm_creds.get('ssh_user'))
+                              ssh_user=slurm_creds.get('ssh_user'),
+                              proxy_jump=slurm_creds.get('proxy_jump'))
         return kwargs
 
     @property

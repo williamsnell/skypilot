@@ -21,7 +21,7 @@ from sky.utils.db import kv_cache
 
 logger = sky_logging.init_logger(__name__)
 
-DEFAULT_SLURM_PATH = '~/.slurm/config'
+DEFAULT_SLURM_PATH = '~/.sky/slurm/config'
 
 _VAR_PATTERN = re.compile(r'\$(\w+|\{[^}]*\})')
 
@@ -161,7 +161,7 @@ def read_credential_contents(
 def get_slurm_credentials_for_remote() -> Optional[Dict[str, Optional[str]]]:
     """Read Slurm SSH credentials for transmission to a remote API server.
 
-    Returns None if no ~/.slurm/config exists or no skypilot_* key is
+    Returns None if no ~/.sky/slurm/config exists or no skypilot_* key is
     configured. Safe to call unconditionally — returns None for non-Slurm
     setups.
     """
@@ -188,6 +188,7 @@ def get_slurm_credentials_for_remote() -> Optional[Dict[str, Optional[str]]]:
         try:
             result = read_credential_contents(identity_file, cert_file)
             result['ssh_user'] = ssh_dict.get('user')
+            result['proxy_jump'] = ssh_dict.get('proxyjump')
             return result
         except (FileNotFoundError, ValueError):
             continue
