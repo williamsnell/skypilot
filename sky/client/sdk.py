@@ -720,7 +720,21 @@ def _get_slurm_credentials_if_remote() -> Optional[Dict[str, Optional[str]]]:
     if server_common.is_api_server_local():
         return None
     try:
-        return slurm_utils.get_slurm_credentials_for_remote()
+        creds = slurm_utils.get_slurm_credentials_for_remote()
+        if creds is None:
+            # Check if a Slurm config exists — if so, the user likely
+            # intended to use Slurm but their key isn't named skypilot_*.
+            try:
+                slurm_utils.get_slurm_ssh_config()
+                logger.warning(
+                    'Slurm config found at %s but no skypilot_* SSH '
+                    'key configured. Credentials will not be sent to '
+                    'the remote API server. To fix, generate a '
+                    'dedicated key: ssh-keygen -t ed25519 '
+                    '-f ~/.ssh/skypilot_slurm', slurm_utils.DEFAULT_SLURM_PATH)
+            except (FileNotFoundError, OSError):
+                pass  # No Slurm config — not a Slurm user.
+        return creds
     except Exception:  # pylint: disable=broad-except
         return None
 

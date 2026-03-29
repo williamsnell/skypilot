@@ -13,6 +13,7 @@ from sky import clouds
 from sky import exceptions
 from sky import sky_logging
 from sky.adaptors import slurm
+from sky.server.slurm_task_queue import peek_credentials
 from sky.skylet import constants
 from sky.utils import annotations
 from sky.utils import common_utils
@@ -123,8 +124,7 @@ def validate_identity_file_for_remote(identity_file: str) -> None:
             f'SSH key for Slurm must start with {_SKYPILOT_KEY_PREFIX!r} '
             f'when used with a remote API server (got {basename!r}). '
             f'Generate a dedicated key with: '
-            f'ssh-keygen -t ed25519 -f ~/.ssh/{_SKYPILOT_KEY_PREFIX}'
-            f'<cluster_name>')
+            f'ssh-keygen -t ed25519 -f ~/.ssh/{_SKYPILOT_KEY_PREFIX}slurm')
 
 
 def read_credential_contents(
@@ -1079,7 +1079,11 @@ def slurm_node_info(
         node_list = _get_slurm_node_info_list(
             slurm_cluster_name=slurm_cluster_name)
     except (FileNotFoundError, RuntimeError, exceptions.NotSupportedError) as e:
-        logger.debug(f'Could not retrieve Slurm node info: {e}')
+        logger.warning(f'Could not retrieve Slurm node info: {e}')
+        return []
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning(f'Could not retrieve Slurm node info '
+                       f'(SSH/auth failure?): {e}')
         return []
     return node_list
 
@@ -1136,13 +1140,25 @@ def get_partition_infos(cluster_name: str) -> Dict[str, slurm.SlurmPartition]:
             os.path.expanduser(DEFAULT_SLURM_PATH))
         slurm_config_dict = slurm_config.lookup(cluster_name)
 
+        ssh_user = slurm_config_dict.get('user')
+        proxy_jump = slurm_config_dict.get('proxyjump')
+        if not ssh_user:
+            user_hash = os.environ.get(constants.USER_ID_ENV_VAR, '')
+            creds = peek_credentials(user_hash, cluster_name)
+            if creds:
+                ssh_user = creds.get('ssh_user')
+                proxy_jump = proxy_jump or creds.get('proxy_jump')
+        if not ssh_user:
+            logger.debug('No SSH user for cluster %s', cluster_name)
+            return {}
+
         client = slurm.SlurmClient(
             slurm_config_dict['hostname'],
             int(slurm_config_dict.get('port', 22)),
-            slurm_config_dict['user'],
+            ssh_user,
             get_identity_file(slurm_config_dict),
             ssh_proxy_command=slurm_config_dict.get('proxycommand', None),
-            ssh_proxy_jump=slurm_config_dict.get('proxyjump', None),
+            ssh_proxy_jump=proxy_jump,
             identities_only=get_identities_only(slurm_config_dict),
             ssh_certificate_file=get_certificate_file(slurm_config_dict),
         )

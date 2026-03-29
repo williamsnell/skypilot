@@ -118,17 +118,18 @@ def list_accelerators_realtime(
 
     if not slurm_nodes_info:
         # Customize error message based on filters
-        err_msg = 'No matching GPU nodes found in the Slurm cluster'
+        err_msg = ('No GPU nodes found in Slurm cluster '
+                   f'{slurm_cluster!r}. This may indicate an SSH/auth '
+                   'failure (e.g. expired credentials) or no GPU nodes '
+                   'in the cluster.')
         filters_applied = []
         if name_filter:
             filters_applied.append(f'gpu_name={name_filter!r}')
         if quantity_filter:
             filters_applied.append(f'quantity>={quantity_filter}')
         if filters_applied:
-            err_msg += f' with filters ({", ".join(filters_applied)})'
-        err_msg += '.'
-        logger.error(
-            err_msg)  # Log as error as it indicates no usable resources found
+            err_msg += f' Filters applied: ({", ".join(filters_applied)}).'
+        logger.error(err_msg)
         raise ValueError(err_msg)
 
     # Aggregate results into the required format
