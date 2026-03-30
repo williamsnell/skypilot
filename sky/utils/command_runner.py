@@ -199,7 +199,10 @@ def proxyjump_to_proxycommand(
     # Without this, the tunnel might hold the pipe open, causing
     # log_lib.process_subprocess_stream() to hang waiting for stderr EOF.
     # Anyways only stdin and stdout is used for -W host:port.
-    cmd += ['-W', '\'[%h]:%p\'', host, '2>/dev/null']
+    cmd += [
+        '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
+        '-W', '\'[%h]:%p\'', host, '2>/dev/null'
+    ]
 
     return ' '.join(cmd)
 
