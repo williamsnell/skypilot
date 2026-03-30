@@ -86,6 +86,8 @@ class RequestName(str, enum.Enum):
     RECIPE_UPDATE = 'recipes.update'
     RECIPE_DELETE = 'recipes.delete'
     RECIPE_PIN = 'recipes.pin'
+    # Slurm SSH setup
+    SETUP_SLURM_SSH = 'setup_slurm_ssh'
     # Internal request daemons
     REQUEST_DAEMON_STATUS_REFRESH = 'status-refresh'
     REQUEST_DAEMON_VOLUME_REFRESH = 'volume-refresh'

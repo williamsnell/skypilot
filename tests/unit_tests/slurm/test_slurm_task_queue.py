@@ -1,17 +1,13 @@
 """Unit tests for sky.server.slurm_task_queue."""
 import concurrent.futures
-import os
 import secrets
-import tempfile
 import threading
 import time
 
 import pytest
 
 from sky.server.slurm_task_queue import _canonical_payload
-from sky.server.slurm_task_queue import pop_credentials
 from sky.server.slurm_task_queue import SlurmTaskQueue
-from sky.server.slurm_task_queue import stash_credentials
 from sky.server.slurm_task_queue import TaskStatus
 from sky.server.slurm_task_queue import TaskType
 
@@ -303,42 +299,6 @@ class TestCleanup:
         queue.cleanup_cluster(name)
         assert not queue.validate_token(name, token)
 
-    def test_cleanup_deletes_temp_key_files(self, queue):
-        """Verify ephemeral key temp files are deleted on cleanup."""
-        # Create temp files in /tmp/ to match the path filter.
-        fd1, path1 = tempfile.mkstemp(prefix='skypilot_key_', dir='/tmp')
-        fd2, path2 = tempfile.mkstemp(prefix='skypilot_cert_', dir='/tmp')
-        os.close(fd1)
-        os.close(fd2)
-        assert os.path.exists(path1)
-        assert os.path.exists(path2)
-
-        # Register them via public API
-        queue.register_ephemeral_key_files('cleanup-test', [path1, path2])
-
-        queue.cleanup_cluster('cleanup-test')
-        assert not os.path.exists(path1)
-        assert not os.path.exists(path2)
-
-
-class TestRegisterEphemeralKeyFiles:
-    """Tests for the register_ephemeral_key_files public API."""
-
-    def test_register_and_cleanup(self, queue):
-        fd, path = tempfile.mkstemp(prefix='skypilot_key_', dir='/tmp')
-        os.close(fd)
-        queue.register_ephemeral_key_files('c1', [path])
-        queue.cleanup_cluster('c1')
-        assert not os.path.exists(path)
-
-    def test_filters_non_tmp_paths(self, queue):
-        """Only /tmp/ paths are tracked."""
-        queue.register_ephemeral_key_files(
-            'c1', ['/tmp/skypilot_key_abc', '/home/user/.ssh/id_rsa', None])
-        with queue._lock:
-            tracked = queue._ephemeral_key_files.get('c1', [])
-        assert tracked == ['/tmp/skypilot_key_abc']
-
 
 class TestConcurrentComplete:
     """Verify complete_task is thread-safe."""
@@ -374,39 +334,6 @@ class TestConcurrentComplete:
         assert result[0] in (0, 1)
 
 
-class TestCredentialIsolation:
-    """Tests for cross-user credential isolation."""
-
-    def test_different_users(self):
-        """User B cannot access user A's credentials."""
-        stash_credentials('user-a', 'PRIVATE_KEY_A')
-        stash_credentials('user-b', 'PRIVATE_KEY_B')
-
-        creds_a = pop_credentials('user-a')
-        creds_b = pop_credentials('user-b')
-
-        assert creds_a is not None
-        assert creds_b is not None
-        assert creds_a['private_key_content'] == 'PRIVATE_KEY_A'
-        assert creds_b['private_key_content'] == 'PRIVATE_KEY_B'
-
-    def test_wrong_user_gets_none(self):
-        """Popping with wrong user_hash returns None."""
-        stash_credentials('user-a', 'SECRET_KEY')
-        result = pop_credentials('user-b')
-        assert result is None
-        # Clean up
-        pop_credentials('user-a')
-
-    def test_pop_is_one_shot(self):
-        """Credentials can only be popped once."""
-        stash_credentials('user-a', 'ONE_TIME_KEY')
-        first = pop_credentials('user-a')
-        second = pop_credentials('user-a')
-        assert first is not None
-        assert second is None
-
-
 class TestTokenAuthRejection:
     """Tests for token validation edge cases."""
 
@@ -433,7 +360,7 @@ class TestKeyNameValidation:
         from sky.provision.slurm.utils import validate_identity_file_for_remote
 
         # Should not raise
-        validate_identity_file_for_remote('/home/user/.ssh/skypilot_isambard')
+        validate_identity_file_for_remote('/home/user/.ssh/skypilot_slurm')
         validate_identity_file_for_remote('/tmp/skypilot_test')
 
     def test_rejects_standard_key_names(self):

@@ -237,6 +237,146 @@ def check(
 @usage_lib.entrypoint
 @server_common.check_server_healthy_or_start
 @annotations.client_api
+def setup_slurm_ssh() -> None:
+    """Persist Slurm SSH credentials on the remote API server.
+
+    Reads ~/.sky/slurm/config locally, extracts the SSH key/cert/user/proxy,
+    and sends them to the API server so all subsequent Slurm operations work
+    without re-sending credentials.
+
+    Raises:
+        FileNotFoundError: If ~/.sky/slurm/config does not exist.
+        ValueError: If no skypilot_* SSH key is configured.
+        RuntimeError: If the API server rejects the request.
+    """
+    # 1. Read local Slurm SSH config
+    try:
+        slurm_config = slurm_utils.get_slurm_ssh_config()
+    except FileNotFoundError as exc:
+        with ux_utils.print_exception_no_traceback():
+            raise FileNotFoundError(
+                f'Slurm SSH config not found at '
+                f'{slurm_utils.DEFAULT_SLURM_PATH}.\n'
+                f'Create it first — see the SkyPilot Slurm docs.') from exc
+
+    # 2. Find the first host with a skypilot_* key
+    ssh_user = None
+    identity_file = None
+    cert_file = None
+    proxy_jump = None
+    for host in list(slurm_config.get_hostnames()) + ['*']:
+        try:
+            ssh_dict = slurm_config.lookup(host)
+        except Exception:  # pylint: disable=broad-except
+            continue
+        ifile = slurm_utils.get_identity_file(ssh_dict)
+        if ifile is None:
+            continue
+        basename = os.path.basename(os.path.expanduser(ifile))
+        if not basename.startswith('skypilot_'):
+            continue
+        identity_file = ifile
+        cert_file = slurm_utils.get_certificate_file(ssh_dict)
+        ssh_user = ssh_dict.get('user')
+        proxy_jump = slurm_utils.resolve_proxy_jump(ssh_dict.get('proxyjump'))
+        break
+
+    if identity_file is None:
+        with ux_utils.print_exception_no_traceback():
+            raise ValueError(
+                'No skypilot_* SSH key found in '
+                f'{slurm_utils.DEFAULT_SLURM_PATH}.\n'
+                'Generate a dedicated key with:\n'
+                '  ssh-keygen -t ed25519 -f ~/.ssh/skypilot_slurm\n'
+                'Then add IdentityFile ~/.ssh/skypilot_slurm to your '
+                'Slurm SSH config.')
+    if ssh_user is None:
+        with ux_utils.print_exception_no_traceback():
+            raise ValueError('No User configured in '
+                             f'{slurm_utils.DEFAULT_SLURM_PATH}.\n'
+                             'Add a User line to your Slurm SSH host block.')
+
+    # 3. Read key/cert contents
+    creds = slurm_utils.read_credential_contents(identity_file, cert_file)
+    private_key_content = creds['private_key_content']
+    certificate_content = creds.get('certificate_content')
+    if private_key_content is None:
+        with ux_utils.print_exception_no_traceback():
+            raise ValueError(f'Could not read SSH key from {identity_file}')
+
+    # 4. Check certificate expiry (if cert exists)
+    cert_expires_at = None
+    if certificate_content and cert_file:
+        cert_expanded = os.path.expanduser(cert_file)
+        try:
+            result = subprocess.run(  # pylint: disable=subprocess-run-check
+                ['ssh-keygen', '-L', '-f', cert_expanded],
+                capture_output=True,
+                text=True,
+                timeout=5)
+            if result.returncode == 0:
+                cert_expires_at = _parse_cert_expiry(result.stdout)
+                if cert_expires_at is not None:
+                    now = time.time()
+                    if cert_expires_at < now:
+                        click.echo(
+                            f'{colorama.Fore.RED}Warning: SSH certificate '
+                            f'has expired.{colorama.Style.RESET_ALL}',
+                            err=True)
+                    elif cert_expires_at - now < 3600:
+                        click.echo(
+                            f'{colorama.Fore.YELLOW}Warning: SSH certificate '
+                            f'expires within 1 hour.'
+                            f'{colorama.Style.RESET_ALL}',
+                            err=True)
+        except Exception:  # pylint: disable=broad-except
+            pass  # Best-effort expiry check
+
+    # 5. POST to server
+    body = payloads.SetupSlurmSshBody(
+        private_key_content=private_key_content,
+        certificate_content=certificate_content,
+        ssh_user=ssh_user,
+        proxy_jump=proxy_jump,
+        cert_expires_at=cert_expires_at,
+    )
+    response = server_common.make_authenticated_request(
+        'POST', '/setup_slurm_ssh', json=json.loads(body.model_dump_json()))
+    if response.status_code != 200:
+        with ux_utils.print_exception_no_traceback():
+            raise RuntimeError(
+                f'Failed to setup Slurm SSH credentials on the API server: '
+                f'{response.text}')
+    click.echo('Slurm SSH credentials configured on the API server.')
+
+
+def _parse_cert_expiry(ssh_keygen_output: str) -> Optional[float]:
+    """Parse the expiry timestamp from ssh-keygen -L output.
+
+    Looks for a line like:
+        Valid: from 2026-03-29T10:00:00 to 2026-03-30T10:00:00
+    Returns the 'to' timestamp as a Unix epoch float, or None.
+    """
+    import datetime as _datetime  # pylint: disable=import-outside-toplevel
+
+    for line in ssh_keygen_output.splitlines():
+        line = line.strip()
+        if line.startswith('Valid:') and ' to ' in line:
+            _, _, to_part = line.partition(' to ')
+            to_str = to_part.strip()
+            # Try ISO format first, then common ssh-keygen formats
+            for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M:%S%z'):
+                try:
+                    dt = _datetime.datetime.strptime(to_str, fmt)
+                    return dt.timestamp()
+                except ValueError:
+                    continue
+    return None
+
+
+@usage_lib.entrypoint
+@server_common.check_server_healthy_or_start
+@annotations.client_api
 def enabled_clouds(workspace: Optional[str] = None,
                    expand: bool = False) -> server_common.RequestId[List[str]]:
     """Gets the enabled clouds.
@@ -416,12 +556,9 @@ def optimize(
     """
     dag_str = dag_utils.dump_dag_to_yaml_str(dag)
 
-    slurm_credentials = _get_slurm_credentials_if_remote(dag)
-
     body = payloads.OptimizeBody(dag=dag_str,
                                  minimize=minimize,
-                                 request_options=admin_policy_request_options,
-                                 slurm_credentials=slurm_credentials)
+                                 request_options=admin_policy_request_options)
     response = server_common.make_authenticated_request(
         'POST', '/optimize', json=json.loads(body.model_dump_json()))
     return server_common.get_request_id(response)
@@ -714,45 +851,6 @@ def launch(
         )
 
 
-def _dag_targets_slurm(dag: 'sky.Dag') -> bool:
-    """Check if any task in the DAG targets Slurm."""
-    for task in dag.tasks:
-        for res in task.resources:
-            if res.cloud is not None and str(res.cloud).lower() == 'slurm':
-                return True
-    return False
-
-
-def _get_slurm_credentials_if_remote(
-    dag: Optional['sky.Dag'] = None,) -> Optional[Dict[str, Optional[str]]]:
-    """Read Slurm SSH credentials for transmission to a remote API server.
-
-    Returns None if the API server is local, no ~/.sky/slurm/config exists,
-    or no skypilot_* key is configured. Safe to call unconditionally.
-    Warns visibly if a DAG targeting Slurm is provided but no valid key
-    is configured.
-    """
-    if server_common.is_api_server_local():
-        return None
-    try:
-        creds = slurm_utils.get_slurm_credentials_for_remote()
-        if creds is None and dag is not None and _dag_targets_slurm(dag):
-            click.echo(
-                f'{colorama.Fore.YELLOW}Warning: Slurm config '
-                f'found at {slurm_utils.DEFAULT_SLURM_PATH} but '
-                f'no skypilot_* SSH key configured. Credentials '
-                f'will not be sent to the remote API server.\n'
-                f'To fix: ssh-keygen -t ed25519 '
-                f'-f ~/.ssh/skypilot_slurm\n'
-                f'Then set IdentityFile ~/.ssh/skypilot_slurm in '
-                f'{slurm_utils.DEFAULT_SLURM_PATH}'
-                f'{colorama.Style.RESET_ALL}',
-                err=True)
-        return creds
-    except Exception:  # pylint: disable=broad-except
-        return None
-
-
 def _launch(
     dag: 'sky.Dag',
     cluster_name: str,
@@ -841,8 +939,6 @@ def _launch(
 
     dag_str = dag_utils.dump_dag_to_yaml_str(dag)
 
-    slurm_credentials = _get_slurm_credentials_if_remote(dag)
-
     body = payloads.LaunchBody(
         task=dag_str,
         cluster_name=cluster_name,
@@ -860,7 +956,6 @@ def _launch(
             _is_launched_by_sky_serve_controller),
         disable_controller_check=_disable_controller_check,
         file_mounts_blob_id=file_mounts_blob_id,
-        slurm_credentials=slurm_credentials,
     )
     response = server_common.make_authenticated_request(
         'POST', '/launch', json=json.loads(body.model_dump_json()), timeout=5)
@@ -937,8 +1032,6 @@ def exec(  # pylint: disable=redefined-builtin
         dag, workdir_only=True)
     dag_str = dag_utils.dump_dag_to_yaml_str(dag)
 
-    slurm_credentials = _get_slurm_credentials_if_remote(dag)
-
     body = payloads.ExecBody(
         task=dag_str,
         cluster_name=cluster_name,
@@ -946,7 +1039,6 @@ def exec(  # pylint: disable=redefined-builtin
         down=down,
         backend=backend.NAME if backend else None,
         file_mounts_blob_id=file_mounts_blob_id,
-        slurm_credentials=slurm_credentials,
     )
 
     response = server_common.make_authenticated_request(
@@ -1351,14 +1443,12 @@ def down(
     if graceful and version is not None and version < 32:
         logger.warning('`--graceful` is ignored because the server does '
                        'not support it yet.')
-    slurm_credentials = _get_slurm_credentials_if_remote()
 
     body = payloads.StopOrDownBody(
         cluster_name=cluster_name,
         purge=purge,
         graceful=graceful,
         graceful_timeout=graceful_timeout,
-        slurm_credentials=slurm_credentials,
     )
     response = server_common.make_authenticated_request(
         'POST', '/down', json=json.loads(body.model_dump_json()), timeout=5)

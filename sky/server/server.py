@@ -2847,6 +2847,28 @@ async def slurm_job_ssh_proxy(websocket: fastapi.WebSocket,
 app.include_router(create_poll_router())
 
 
+@app.post('/setup_slurm_ssh')
+async def setup_slurm_ssh(body: payloads.SetupSlurmSshBody,) -> dict:
+    """Persist Slurm SSH credentials for the calling user.
+
+    This is a synchronous endpoint (no scheduler) — it just writes
+    key/cert/config files to the per-user directory on disk.
+    """
+    user_hash = body.user_hash
+    if not user_hash:
+        raise fastapi.HTTPException(status_code=400,
+                                    detail='Missing user_hash in env_vars')
+    user_dir = slurm_utils.persist_slurm_ssh_credentials(
+        user_hash=user_hash,
+        private_key_content=body.private_key_content,
+        ssh_user=body.ssh_user,
+        certificate_content=body.certificate_content,
+        proxy_jump=body.proxy_jump,
+        cert_expires_at=body.cert_expires_at,
+    )
+    return {'status': 'ok', 'user_dir': user_dir}
+
+
 @app.websocket('/ssh-interactive-auth')
 async def ssh_interactive_auth(websocket: fastapi.WebSocket,
                                session_id: str) -> None:

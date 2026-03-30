@@ -704,6 +704,15 @@ class ClientError(Exception):
     pass
 
 
+class SlurmSshSetupRequired(Exception):
+    """Raised when Slurm SSH credentials are not configured on the API server.
+
+    The user must run ``sky setup-slurm-ssh`` to persist their SSH key and
+    certificate on the server before Slurm operations will work.
+    """
+    pass
+
+
 class ConcurrentWorkerExhaustedError(Exception):
     """Raised when the concurrent worker is exhausted."""
     pass

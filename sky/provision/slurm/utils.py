@@ -1,4 +1,6 @@
 """Slurm utilities for SkyPilot."""
+from datetime import datetime
+from datetime import timezone
 import json
 import math
 import os
@@ -13,7 +15,6 @@ from sky import clouds
 from sky import exceptions
 from sky import sky_logging
 from sky.adaptors import slurm
-from sky.server.slurm_task_queue import peek_credentials
 from sky.skylet import constants
 from sky.utils import annotations
 from sky.utils import common_utils
@@ -92,12 +93,144 @@ SLURM_SSHD_HOST_KEY_FILENAME = 'skypilot_host_key'
 # Started from the batch step's cgroup so it survives srun cleanup.
 PODMAN_HPC_DROPBEAR_PORT = 2222
 
+SLURM_USERS_DIR = '~/.sky/slurm/users'
 
-def get_slurm_ssh_config() -> SSHConfig:
-    """Get the Slurm SSH config."""
-    slurm_config_path = os.path.expanduser(DEFAULT_SLURM_PATH)
-    slurm_config = SSHConfig.from_path(slurm_config_path)
+
+def persist_slurm_ssh_credentials(
+    user_hash: str,
+    private_key_content: str,
+    ssh_user: str,
+    certificate_content: Optional[str] = None,
+    proxy_jump: Optional[str] = None,
+    cert_expires_at: Optional[float] = None,
+) -> str:
+    """Persist SSH credentials for a Slurm user on the API server.
+
+    Writes the private key (and optional certificate) to a per-user
+    directory, then generates an SSH config overlay so that
+    get_slurm_ssh_config() automatically picks up User, IdentityFile,
+    CertificateFile, and ProxyJump for this user.
+
+    Returns the path to the per-user directory.
+    """
+    if not user_hash:
+        raise ValueError('user_hash is required')
+
+    user_dir = os.path.expanduser(os.path.join(SLURM_USERS_DIR, user_hash))
+    os.makedirs(user_dir, mode=0o700, exist_ok=True)
+
+    # Write private key
+    key_path = os.path.join(user_dir, 'skypilot_slurm')
+    with open(key_path, 'w', encoding='utf-8') as f:
+        f.write(private_key_content)
+    os.chmod(key_path, 0o600)
+
+    # Write certificate if provided
+    cert_path = None
+    if certificate_content:
+        cert_path = os.path.join(user_dir, 'skypilot_slurm-cert.pub')
+        with open(cert_path, 'w', encoding='utf-8') as f:
+            f.write(certificate_content)
+        os.chmod(cert_path, 0o644)
+
+    # Write certificate expiry timestamp
+    expires_path = os.path.join(user_dir, 'cert_expires_at')
+    if cert_expires_at is not None:
+        with open(expires_path, 'w', encoding='utf-8') as f:
+            f.write(str(cert_expires_at))
+    elif os.path.exists(expires_path):
+        os.remove(expires_path)
+
+    # Generate SSH config overlay
+    # Uses Host * so it applies to all hosts; the base config provides
+    # HostName, Port, ContainerRuntime per-host. This overlay adds
+    # the per-user fields that win via SSH first-match semantics.
+    config_lines = [
+        'Host *',
+        f'    User {ssh_user}',
+        f'    IdentityFile {key_path}',
+        '    IdentitiesOnly yes',
+    ]
+    if cert_path:
+        config_lines.append(f'    CertificateFile {cert_path}')
+    if proxy_jump:
+        config_lines.append(f'    ProxyJump {proxy_jump}')
+    config_lines.append('')  # trailing newline
+
+    config_path = os.path.join(user_dir, 'config')
+    with open(config_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(config_lines))
+
+    logger.info('Persisted Slurm SSH credentials for user=%s in %s',
+                user_hash[:8], user_dir)
+    return user_dir
+
+
+def get_slurm_ssh_config(user_hash: Optional[str] = None,) -> SSHConfig:
+    """Get the Slurm SSH config, optionally merged with a per-user overlay.
+
+    If user_hash is provided and a per-user overlay exists at
+    ~/.sky/slurm/users/{user_hash}/config, it is parsed first so its
+    values (User, IdentityFile, ProxyJump, etc.) take precedence via
+    SSH first-match semantics.
+
+    If user_hash is None, falls back to the USER_ID_ENV_VAR environment
+    variable (set by the API server on every request).
+    """
+    if user_hash is None:
+        user_hash = os.environ.get(constants.USER_ID_ENV_VAR, '')
+
+    slurm_config = SSHConfig()
+
+    # Parse per-user overlay first (if it exists) so its values win.
+    if user_hash:
+        overlay_path = os.path.expanduser(
+            os.path.join(SLURM_USERS_DIR, user_hash, 'config'))
+        if os.path.isfile(overlay_path):
+            with open(overlay_path, 'r', encoding='utf-8') as f:
+                slurm_config.parse(f)
+
+    # Parse base config.
+    base_path = os.path.expanduser(DEFAULT_SLURM_PATH)
+    with open(base_path, 'r', encoding='utf-8') as f:
+        slurm_config.parse(f)
+
     return slurm_config
+
+
+def check_cert_expiry(user_hash: str) -> Optional[float]:
+    """Check if a persisted certificate has an expiry timestamp.
+
+    Returns the expiry as a Unix epoch float, or None if no expiry is stored.
+    Raises exceptions.SlurmSshSetupRequired if the certificate has expired.
+    """
+    if not user_hash:
+        return None
+    expires_path = os.path.expanduser(
+        os.path.join(SLURM_USERS_DIR, user_hash, 'cert_expires_at'))
+    if not os.path.isfile(expires_path):
+        return None
+    try:
+        with open(expires_path, 'r', encoding='utf-8') as f:
+            expires_at = float(f.read().strip())
+    except (ValueError, OSError):
+        return None
+    if expires_at < time.time():
+        expiry_str = datetime.fromtimestamp(expires_at,
+                                            tz=timezone.utc).isoformat()
+        raise exceptions.SlurmSshSetupRequired(
+            f'Slurm SSH certificate expired (was valid until {expiry_str}).\n'
+            f'Please re-run: sky setup-slurm-ssh')
+    return expires_at
+
+
+def has_persisted_credentials(user_hash: str) -> bool:
+    """Check whether persisted SSH credentials exist for this user."""
+    if not user_hash:
+        return False
+    key_path = os.path.expanduser(
+        os.path.join(SLURM_USERS_DIR, user_hash, 'skypilot_slurm'))
+    return os.path.isfile(key_path)
 
 
 _SKYPILOT_KEY_PREFIX = 'skypilot_'
@@ -116,7 +249,7 @@ def validate_identity_file_for_remote(identity_file: str) -> None:
 
     When transmitting credentials to a remote API server, we require
     a purpose-built key to limit blast radius if the key is compromised.
-    The key filename must start with 'skypilot_' (e.g. skypilot_isambard).
+    The key filename must start with 'skypilot_' (e.g. skypilot_slurm).
     """
     basename = os.path.basename(identity_file)
     if not basename.startswith(_SKYPILOT_KEY_PREFIX):
@@ -158,10 +291,10 @@ def read_credential_contents(
     return result
 
 
-def _resolve_proxy_jump(proxy_jump: Optional[str]) -> Optional[str]:
+def resolve_proxy_jump(proxy_jump: Optional[str]) -> Optional[str]:
     """Resolve a ProxyJump value through the local SSH config.
 
-    The ProxyJump may reference an SSH alias (e.g. jump.a6n.aip2.isambard)
+    The ProxyJump may reference an SSH alias (e.g. jump.cluster.example)
     that only exists in the client's SSH config. The remote API server
     won't have this alias, so we resolve it to the actual hostname here.
 
@@ -202,44 +335,6 @@ def _resolve_proxy_jump(proxy_jump: Optional[str]) -> Optional[str]:
     return f'{user_prefix}{host}{port_suffix}'
 
 
-def get_slurm_credentials_for_remote() -> Optional[Dict[str, Optional[str]]]:
-    """Read Slurm SSH credentials for transmission to a remote API server.
-
-    Returns None if no ~/.sky/slurm/config exists or no skypilot_* key is
-    configured. Safe to call unconditionally — returns None for non-Slurm
-    setups.
-    """
-    try:
-        slurm_config = get_slurm_ssh_config()
-    except (FileNotFoundError, OSError):
-        return None
-
-    # Check all configured clusters for a skypilot_* key.
-    # Use the default ('*') host if no specific cluster is found.
-    for host in list(slurm_config.get_hostnames()) + ['*']:
-        try:
-            ssh_dict = slurm_config.lookup(host)
-        except Exception:  # pylint: disable=broad-except
-            continue
-        identity_file = get_identity_file(ssh_dict)
-        if identity_file is None:
-            continue
-        basename = os.path.basename(os.path.expanduser(identity_file))
-        if not basename.startswith(_SKYPILOT_KEY_PREFIX):
-            continue
-        # Found a skypilot_* key — read its contents.
-        cert_file = get_certificate_file(ssh_dict)
-        try:
-            result = read_credential_contents(identity_file, cert_file)
-            result['ssh_user'] = ssh_dict.get('user')
-            result['proxy_jump'] = _resolve_proxy_jump(
-                ssh_dict.get('proxyjump'))
-            return result
-        except (FileNotFoundError, ValueError):
-            continue
-    return None
-
-
 def get_identities_only(ssh_config_dict: Dict[str, Any]) -> bool:
     """Check if IdentitiesOnly is set to yes in SSH config.
 
@@ -256,36 +351,34 @@ def get_certificate_file(ssh_config_dict: Dict[str, Any]) -> Optional[str]:
 
 def make_slurm_client_from_config(
     ssh_config_dict: Dict[str, Any],
-    cluster_name: Optional[str] = None,
+    cluster_name: Optional[str] = None,  # pylint: disable=unused-argument
     **kwargs: Any,
 ) -> slurm.SlurmClient:
     """Create a SlurmClient from an SSH config dict.
 
-    Falls back to stashed ephemeral credentials for user and proxy_jump
-    when they are missing from the server-side config (remote API server).
+    The SSH config dict should already contain User, IdentityFile, etc.
+    from the merged base + per-user overlay (see get_slurm_ssh_config).
     Extra kwargs are forwarded to SlurmClient (e.g. enable_interactive_auth).
-    Raises ValueError if no user can be resolved.
+
+    Raises SlurmSshSetupRequired if no user can be resolved.
     """
     ssh_user = ssh_config_dict.get('user')
-    proxy_jump = ssh_config_dict.get('proxyjump')
     if not ssh_user:
-        user_hash = os.environ.get(constants.USER_ID_ENV_VAR, '')
-        creds = peek_credentials(user_hash)
-        if creds:
-            ssh_user = creds.get('ssh_user')
-            proxy_jump = proxy_jump or creds.get('proxy_jump')
-    if not ssh_user:
-        raise ValueError(
-            f'SSH user not available for cluster {cluster_name}. '
-            'Ensure User is set in ~/.sky/slurm/config or that the '
-            'client sends credentials with the request.')
+        raise exceptions.SlurmSshSetupRequired(
+            'Slurm SSH credentials have not been configured on this '
+            'API server.\nPlease run: sky setup-slurm-ssh')
+
+    # Check certificate expiry if persisted credentials exist.
+    user_hash = os.environ.get(constants.USER_ID_ENV_VAR, '')
+    check_cert_expiry(user_hash)
+
     return slurm.SlurmClient(
         ssh_config_dict['hostname'],
         int(ssh_config_dict.get('port', 22)),
         ssh_user,
         get_identity_file(ssh_config_dict),
         ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
-        ssh_proxy_jump=proxy_jump,
+        ssh_proxy_jump=ssh_config_dict.get('proxyjump'),
         identities_only=get_identities_only(ssh_config_dict),
         ssh_certificate_file=get_certificate_file(ssh_config_dict),
         **kwargs,

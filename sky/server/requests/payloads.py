@@ -34,7 +34,6 @@ from sky import skypilot_config
 from sky.adaptors import common as adaptors_common
 from sky.adaptors import kubernetes as kubernetes_adaptor
 from sky.server import common
-from sky.server.slurm_task_queue import stash_credentials
 from sky.skylet import autostop_lib
 from sky.skylet import constants
 from sky.usage import constants as usage_constants
@@ -148,6 +147,29 @@ class BasePayload(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra='ignore')
 
 
+class SetupSlurmSshBody(BasePayload):
+    """Payload for the sky setup-slurm-ssh endpoint.
+
+    Sent by the client after reading the local ~/.sky/slurm/config.
+    The server persists the key/cert to per-user storage so all
+    subsequent Slurm operations work without re-sending credentials.
+    """
+    env_vars: Dict[str, str] = {}
+    private_key_content: str
+    certificate_content: Optional[str] = None
+    ssh_user: str
+    proxy_jump: Optional[str] = None
+    cert_expires_at: Optional[float] = None
+
+    def __init__(self, **data):
+        data['env_vars'] = data.get('env_vars', request_body_env_vars())
+        super().__init__(**data)
+
+    @property
+    def user_hash(self) -> Optional[str]:
+        return self.env_vars.get(constants.USER_ID_ENV_VAR)
+
+
 class RequestBody(BasePayload):
     """The request body for the SkyPilot API."""
     env_vars: Dict[str, str] = {}
@@ -158,10 +180,6 @@ class RequestBody(BasePayload):
     override_skypilot_config_path: Optional[str] = None
     # Blob ID for uploaded file mounts
     file_mounts_blob_id: Optional[str] = None
-    # Ephemeral SSH credentials for Slurm (remote API server only).
-    # Contains private_key_content and optionally certificate_content.
-    # Never persisted — held in server memory only during provisioning.
-    slurm_credentials: Optional[Dict[str, Optional[str]]] = None
 
     def __init__(self, **data):
         data['env_vars'] = data.get('env_vars', request_body_env_vars())
@@ -195,17 +213,6 @@ class RequestBody(BasePayload):
         kwargs.pop('override_skypilot_config')
         kwargs.pop('override_skypilot_config_path')
         kwargs.pop('file_mounts_blob_id')
-        slurm_creds = kwargs.pop('slurm_credentials', None)
-        # Stash credentials server-side for the provisioner to retrieve.
-        # They never enter the kwargs (which may be logged/serialized).
-        # Keyed by user_hash for cross-user isolation.
-        if slurm_creds and slurm_creds.get('private_key_content'):
-            uhash = self.user_hash or ''
-            stash_credentials(uhash,
-                              slurm_creds['private_key_content'],
-                              slurm_creds.get('certificate_content'),
-                              ssh_user=slurm_creds.get('ssh_user'),
-                              proxy_jump=slurm_creds.get('proxy_jump'))
         return kwargs
 
     @property

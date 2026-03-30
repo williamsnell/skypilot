@@ -19,7 +19,6 @@ from sky.provision import constants
 from sky.provision.slurm import utils as slurm_utils
 from sky.server import common as server_common
 from sky.server.slurm_task_queue import get_task_queue
-from sky.server.slurm_task_queue import pop_credentials
 from sky.skylet import constants as skylet_constants
 from sky.utils import command_runner
 from sky.utils import common_utils
@@ -378,47 +377,6 @@ def _wait_for_job_ready(
         _poll_sleep(poll_interval)
 
 
-def _resolve_ephemeral_ssh_credentials(
-    ssh_key: str,
-    cluster_name: str,
-) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
-    """Resolve SSH key from ephemeral credentials if local file is missing.
-
-    On a remote API server, the SSH key path from ~/.sky/slurm/config won't
-    exist locally. The client sends key contents in the request payload,
-    which are stashed in server memory. This function pops those
-    credentials and writes them to temp files.
-
-    Returns:
-        (ssh_key_path, certificate_path, ssh_user, proxy_jump) — the key
-        path is updated to the temp file if credentials were found,
-        otherwise returned unchanged. Other fields are None if not
-        stashed.
-    """
-    user_hash = os.environ.get(skylet_constants.USER_ID_ENV_VAR, '')
-    creds = pop_credentials(user_hash)
-    if not creds or not creds.get('private_key_content'):
-        return ssh_key, None, None, None
-
-    private_key_content = creds['private_key_content']
-    assert private_key_content is not None  # Checked above via .get()
-    key_fd, key_path = tempfile.mkstemp(prefix='skypilot_key_', suffix='.pem')
-    with os.fdopen(key_fd, 'w') as f:
-        f.write(private_key_content)
-    os.chmod(key_path, 0o600)
-    logger.debug('Using ephemeral SSH key for %s', cluster_name)
-
-    cert_path = None
-    cert_content = creds.get('certificate_content')
-    if cert_content:
-        cert_fd, cert_path = tempfile.mkstemp(prefix='skypilot_cert_',
-                                              suffix='.pub')
-        with os.fdopen(cert_fd, 'w') as f:
-            f.write(cert_content)
-
-    return key_path, cert_path, creds.get('ssh_user'), creds.get('proxy_jump')
-
-
 @timeline.event
 def _create_virtual_instance(
         region: str, cluster_name: str, cluster_name_on_cloud: str,
@@ -439,42 +397,10 @@ def _create_virtual_instance(
     identities_only = ssh_config_dict.get('identities_only', False)
     ssh_certificate_file = ssh_config_dict.get('certificate_file', None)
 
-    # If the key path doesn't exist locally (remote API server), check for
-    # ephemeral credentials sent by the client. Write to temp files that
-    # persist for the full launch duration (workdir sync, setup, etc. all
-    # need them). Cleaned up in terminate_instances() or server restart.
-    if ssh_key and not os.path.exists(os.path.expanduser(ssh_key)):
-        (ssh_key, cert_path, cred_user,
-         cred_proxy_jump) = _resolve_ephemeral_ssh_credentials(
-             ssh_key, cluster_name)
-        if ssh_key and ssh_key.startswith('/tmp/'):
-            # Update provider_config so downstream SSH operations
-            # (workdir sync, file mounts) use the ephemeral key.
-            ssh_config_dict['private_key'] = ssh_key
-            if cert_path:
-                ssh_certificate_file = cert_path
-                ssh_config_dict['certificate_file'] = cert_path
-            if cred_user:
-                ssh_user = cred_user
-                ssh_config_dict['user'] = cred_user
-            if cred_proxy_jump:
-                ssh_proxy_jump = cred_proxy_jump
-                ssh_config_dict['proxyjump'] = cred_proxy_jump
-            # Track temp files for cleanup on teardown.
-            paths = [ssh_key]
-            if cert_path:
-                paths.append(cert_path)
-            get_task_queue().register_ephemeral_key_files(cluster_name, paths)
-        else:
-            logger.warning(
-                'SSH key %s not found and no ephemeral '
-                'credentials available', ssh_key)
-
     if not ssh_user:
-        raise ValueError(
-            'SSH user not configured. Set User in the server\'s '
-            '~/.sky/slurm/config or ensure the client sends ssh_user '
-            'in credentials.')
+        raise exceptions.SlurmSshSetupRequired(
+            'Slurm SSH credentials have not been configured on this '
+            'API server.\nPlease run: sky setup-slurm-ssh')
 
     partition = slurm_utils.get_partition_from_config(provider_config)
 
@@ -1342,20 +1268,6 @@ def terminate_instances(
         ssh_proxy_jump = ssh_config_dict.get('proxyjump', None)
         identities_only = ssh_config_dict.get('identities_only', False)
         ssh_certificate_file = ssh_config_dict.get('certificate_file', None)
-
-        # If the key doesn't exist locally (remote API server), check
-        # for ephemeral credentials sent by the client.
-        if (ssh_private_key and
-                not os.path.exists(os.path.expanduser(ssh_private_key))):
-            (ssh_private_key, cert_path, cred_user,
-             cred_proxy_jump) = _resolve_ephemeral_ssh_credentials(
-                 ssh_private_key, cluster_name_on_cloud)
-            if cert_path:
-                ssh_certificate_file = cert_path
-            if cred_user:
-                ssh_user = cred_user
-            if cred_proxy_jump:
-                ssh_proxy_jump = cred_proxy_jump
 
         client = slurm.SlurmClient(
             ssh_host,

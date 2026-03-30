@@ -3749,6 +3749,36 @@ def check(infra_list: Tuple[str],
                         fg='green'))
 
 
+@cli.command(cls=_DocumentedCodeCommand, name='setup-slurm-ssh')
+@flags.config_option(expose_value=False)
+@usage_lib.entrypoint
+def setup_slurm_ssh():
+    # pylint: disable=line-too-long
+    """Persist Slurm SSH credentials on the remote API server.
+
+    Reads your local ~/.sky/slurm/config, extracts the SSH key, certificate,
+    user, and proxy jump settings, then sends them to the API server. After
+    this, all Slurm operations (launch, exec, down, etc.) work without
+    re-sending credentials.
+
+    Prerequisites:
+
+    \b
+    1. A dedicated SSH key: ssh-keygen -t ed25519 -f ~/.ssh/skypilot_slurm
+    2. A Slurm SSH config at ~/.sky/slurm/config with IdentityFile pointing
+       to the key above.
+
+    Examples:
+
+    .. code-block:: bash
+
+      # Set up Slurm SSH credentials on the API server.
+      sky setup-slurm-ssh
+    """
+    # pylint: enable=line-too-long
+    sdk.setup_slurm_ssh()
+
+
 @cli.command()
 @flags.config_option(expose_value=False)
 @click.argument('accelerator_str', required=False)

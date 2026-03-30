@@ -26,7 +26,6 @@ from dataclasses import field
 import enum
 import hashlib
 import logging
-import os
 import secrets
 import threading
 import time
@@ -103,8 +102,6 @@ class SlurmTaskQueue:
         self._workers: Dict[str, WorkerState] = {}
         # cluster_name -> Ed25519PrivateKey
         self._signing_keys: Dict[str, Ed25519PrivateKey] = {}
-        # cluster_name -> list of temp file paths for ephemeral SSH keys
-        self._ephemeral_key_files: Dict[str, List[str]] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
@@ -307,18 +304,6 @@ class SlurmTaskQueue:
         return worker.last_heartbeat
 
     # ------------------------------------------------------------------ #
-    # Ephemeral key file tracking
-    # ------------------------------------------------------------------ #
-
-    def register_ephemeral_key_files(self, cluster_name: str,
-                                     paths: List[str]) -> None:
-        """Track temp key files for cleanup on cluster teardown."""
-        with self._lock:
-            self._ephemeral_key_files[cluster_name] = [
-                p for p in paths if p and p.startswith('/tmp/')
-            ]
-
-    # ------------------------------------------------------------------ #
     # Cleanup
     # ------------------------------------------------------------------ #
 
@@ -332,13 +317,6 @@ class SlurmTaskQueue:
             self._tasks.pop(cluster_name, None)
             self._workers.pop(cluster_name, None)
             self._signing_keys.pop(cluster_name, None)
-            # Delete ephemeral SSH key temp files.
-            for path in self._ephemeral_key_files.pop(cluster_name, []):
-                try:
-                    os.unlink(path)
-                    logger.debug('Deleted ephemeral key file %s', path)
-                except OSError:
-                    pass
         self.remove_tokens(cluster_name)
         logger.info('Cleaned up state for cluster %s', cluster_name)
 
@@ -438,46 +416,3 @@ def get_task_queue() -> SlurmTaskQueue:
             if _queue is None:
                 _queue = SlurmTaskQueue()
     return _queue
-
-
-# ---------------------------------------------------------------------- #
-# Ephemeral credential store
-#
-# Credentials are stashed here between request receipt and provisioning.
-# They live only in server memory — never persisted to disk or database.
-# The provisioner pops them (deleting from memory) and writes to temp
-# files that are cleaned up after the SSH operation completes.
-# ---------------------------------------------------------------------- #
-
-# Keyed by user_hash so different users can't access each other's
-# credentials. One set of Slurm credentials per user.
-_ephemeral_credentials: Dict[str, Dict[str, Optional[str]]] = {}
-_cred_lock = threading.Lock()
-
-
-def stash_credentials(user_hash: str,
-                      private_key_content: str,
-                      certificate_content: Optional[str] = None,
-                      ssh_user: Optional[str] = None,
-                      proxy_jump: Optional[str] = None) -> None:
-    """Stash credentials in memory for the provisioner to retrieve."""
-    with _cred_lock:
-        _ephemeral_credentials[user_hash] = {
-            'private_key_content': private_key_content,
-            'certificate_content': certificate_content,
-            'ssh_user': ssh_user,
-            'proxy_jump': proxy_jump,
-        }
-    logger.info('Stashed ephemeral credentials for user=%s', user_hash[:8])
-
-
-def peek_credentials(user_hash: str) -> Optional[Dict[str, Optional[str]]]:
-    """Read credentials without removing them. Returns None if not stashed."""
-    with _cred_lock:
-        return _ephemeral_credentials.get(user_hash)
-
-
-def pop_credentials(user_hash: str) -> Optional[Dict[str, Optional[str]]]:
-    """Pop credentials from the store. Returns None if not stashed."""
-    with _cred_lock:
-        return _ephemeral_credentials.pop(user_hash, None)
