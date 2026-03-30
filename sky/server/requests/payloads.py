@@ -107,6 +107,13 @@ def request_body_env_vars() -> dict:
     # local Kubernetes environment and should not be forwarded to the server,
     # which has its own cluster context configuration.
     env_vars.pop(kubernetes_adaptor.IN_CLUSTER_CONTEXT_NAME_ENV_VAR, None)
+    # Send the API server endpoint so the server knows its own external
+    # URL (needed for Slurm poll worker config). The config merge strips
+    # api_server from client overrides, but env vars survive.
+    if constants.SKY_API_SERVER_URL_ENV_VAR not in env_vars:
+        endpoint = skypilot_config.get_nested(('api_server', 'endpoint'), None)
+        if endpoint is not None:
+            env_vars[constants.SKY_API_SERVER_URL_ENV_VAR] = endpoint
     return env_vars
 
 

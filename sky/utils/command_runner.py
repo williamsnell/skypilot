@@ -2025,7 +2025,14 @@ exec {ssh_command} srun --unbuffered --quiet --overlap \\
         cmd: Union[str, List[str]],
         **kwargs,
     ) -> Union[int, Tuple[int, str, str]]:
-        # Both host and container: ensure environment is consistent.
+        if (self.container_args and
+                self.container_args.startswith('podman-hpc')):
+            # podman-hpc: only run inside the container. The host may
+            # have an ancient Python (e.g. 3.6) that breaks uv/pip, and
+            # everything (venv, SkyPilot wheel, Dropbear) is only needed
+            # inside the container.
+            return self._run_via_srun(cmd, in_container=True, **kwargs)
+        # Pyxis/enroot or non-container: run on host first, then container.
         result = self._run_via_srun(cmd, in_container=False, **kwargs)
         if self.container_args:
             returncode = result if isinstance(result, int) else result[0]

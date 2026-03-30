@@ -534,17 +534,17 @@ def start_skylet_on_head_node(
     container_runtime = provider_config.get('container_runtime')
     if (cluster_info.provider_name == 'slurm' and
             container_runtime == 'podman-hpc'):
-        # The sbatch script watches for the signal at
-        # {sky_cluster_home_dir}/.sky_start_skylet, which is inside the
-        # per-cluster directory, NOT the user's $HOME.
-        signal_path = (f'$HOME/.sky_clusters/{cluster_name.name_on_cloud}'
-                       f'/{constants.SLURM_SKYLET_START_SIGNAL}')
+        # The runner's srun wrapper sets HOME to sky_cluster_home_dir,
+        # so $HOME/.sky_start_skylet resolves to the correct path that
+        # the sbatch script is watching.
+        signal_file = constants.SLURM_SKYLET_START_SIGNAL
         logger.info('Signaling sbatch script to start Skylet '
                     '(proctrack/cgroup mode)')
-        returncode, stdout, stderr = head_runner.run(f'touch {signal_path}',
-                                                     stream_logs=False,
-                                                     require_outputs=True,
-                                                     log_path=log_path_abs)
+        returncode, stdout, stderr = head_runner.run(
+            f'touch $HOME/{signal_file}',
+            stream_logs=False,
+            require_outputs=True,
+            log_path=log_path_abs)
         if returncode:
             raise RuntimeError('Failed to signal Skylet start on the head node '
                                f'(exit code {returncode}). Error: '
