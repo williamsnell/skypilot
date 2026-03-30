@@ -3721,18 +3721,38 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         return 0
 
     def _wait_for_poll_worker(self,
-                              cluster_name: str,
+                              handle: 'CloudVmRayResourceHandle',
                               timeout: float = 120.0) -> None:
         """Block until the poll worker sends its first heartbeat."""
+        cluster_name = handle.cluster_name_on_cloud
         queue = get_task_queue()
         deadline = time.time() + timeout
         while time.time() < deadline:
             if queue.is_worker_online(cluster_name):
                 return
             time.sleep(2)
+        # Try to fetch poll worker log from the remote node for diagnostics.
+        # The log lives on shared NFS at
+        # ~/.sky_clusters/{cluster_name}/.sky/poll_worker.log
+        poll_log_tail = ''
+        try:
+            runners = handle.get_command_runners()
+            if runners:
+                log_path = (f'~/.sky_clusters/{cluster_name}'
+                            '/.sky/poll_worker.log')
+                rc, stdout, _ = runners[0].run(
+                    f'cat {log_path} 2>/dev/null || '
+                    f'echo "(no poll worker log at {log_path})"',
+                    stream_logs=False)
+                if rc == 0 and stdout.strip():
+                    poll_log_tail = (
+                        '\n--- poll worker log ---\n' +
+                        '\n'.join(stdout.strip().splitlines()[-30:]))
+        except Exception:  # pylint: disable=broad-except
+            pass
         raise RuntimeError(
             f'Poll worker for {cluster_name} did not come online '
-            f'within {timeout}s')
+            f'within {timeout}s{poll_log_tail}')
 
     def _setup(self, handle: CloudVmRayResourceHandle, task: task_lib.Task,
                detach_setup: bool) -> None:
@@ -3902,7 +3922,7 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         queue = get_task_queue()
 
         logger.info('Waiting for poll worker to come online...')
-        self._wait_for_poll_worker(cluster_name)
+        self._wait_for_poll_worker(handle)
 
         internal_ips = handle.internal_ips()
         setup_envs = task_lib.get_plaintext_envs_and_secrets(

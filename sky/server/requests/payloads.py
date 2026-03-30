@@ -115,10 +115,13 @@ def get_override_skypilot_config_from_client() -> Dict[str, Any]:
     if annotations.is_on_api_server:
         return {}
     config = skypilot_config.to_dict()
-    # Remove the API server config, as we should not specify the SkyPilot
-    # server endpoint on the server side. This avoids the warning at
-    # server-side.
+    # Keep api_server.endpoint (the server needs it to tell Slurm poll
+    # workers how to reach back), but strip other api_server keys that
+    # are client-only (e.g. auth tokens).
+    saved_endpoint = config.get_nested(('api_server', 'endpoint'), None)
     config.pop_nested(('api_server',), default_value=None)
+    if saved_endpoint is not None:
+        config.set_nested(('api_server', 'endpoint'), saved_endpoint)
     # Remove the admin policy, as the policy has been applied on the client
     # side.
     config.pop_nested(('admin_policy',), default_value=None)

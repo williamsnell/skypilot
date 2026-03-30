@@ -309,14 +309,26 @@ def _sbatch_keep_alive_block(
     poll_worker_block = ''
     if poll_token and poll_pubkey_b64 and api_server_url:
         pubkey_file = f'{sky_cluster_home_dir}/.sky/.server_pubkey'
+        poll_log = f'{sky_cluster_home_dir}/.sky/poll_worker.log'
         poll_worker_cmd = (
             f'source {skypilot_runtime_dir}/skypilot-runtime/bin/activate && '
             f'export HOME={sky_cluster_home_dir} && '
             f'export SKYPILOT_POLL_TOKEN={shlex.quote(poll_token)} && '
+            f'echo "[poll-worker] Starting at $(date)" >> {poll_log} && '
+            f'echo "[poll-worker] API server: {api_server_url}" '
+            f'>> {poll_log} && '
+            f'echo "[poll-worker] Connectivity test..." >> {poll_log} && '
+            f'curl -s -o /dev/null -w '
+            f'"[poll-worker] curl %{{url}}: HTTP %{{http_code}} '
+            f'in %{{time_total}}s\\n" '
+            f'{shlex.quote(api_server_url)}/api/health '
+            f'>> {poll_log} 2>&1 || '
+            f'echo "[poll-worker] curl FAILED: $?" >> {poll_log} && '
             f'python -m sky.provision.slurm.poll_worker '
             f'--api-server-url {shlex.quote(api_server_url)} '
             f'--cluster-name {shlex.quote(cluster_name_on_cloud)} '
-            f'--server-pubkey-file {pubkey_file}')
+            f'--server-pubkey-file {pubkey_file} '
+            f'>> {poll_log} 2>&1')
         poll_worker_block = (
             '# Write server public key for poll worker auth.\n'
             f'echo {shlex.quote(poll_pubkey_b64)} | '

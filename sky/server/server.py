@@ -2848,13 +2848,23 @@ app.include_router(create_poll_router())
 
 
 @app.post('/setup_slurm_ssh')
-async def setup_slurm_ssh(body: payloads.SetupSlurmSshBody,) -> dict:
+async def setup_slurm_ssh(
+    request: fastapi.Request,
+    body: payloads.SetupSlurmSshBody,
+) -> dict:
     """Persist Slurm SSH credentials for the calling user.
 
     This is a synchronous endpoint (no scheduler) — it just writes
     key/cert/config files to the per-user directory on disk.
     """
-    user_hash = body.user_hash
+    # Use authenticated user ID if available (matches what the executor
+    # sets for scheduled requests like sky check / sky launch).
+    auth_user = getattr(request.state, 'auth_user', None)
+    user_hash = auth_user.id if auth_user is not None else body.user_hash
+    logger.info('setup_slurm_ssh: user_hash=%s (auth=%s, body=%s)',
+                user_hash[:8] if user_hash else None,
+                auth_user.id[:8] if auth_user is not None else None,
+                body.user_hash[:8] if body.user_hash else None)
     if not user_hash:
         raise fastapi.HTTPException(status_code=400,
                                     detail='Missing user_hash in env_vars')
