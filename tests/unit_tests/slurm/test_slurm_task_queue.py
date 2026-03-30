@@ -377,13 +377,13 @@ class TestConcurrentComplete:
 class TestCredentialIsolation:
     """Tests for cross-user credential isolation."""
 
-    def test_different_users_same_cluster_name(self):
+    def test_different_users(self):
         """User B cannot access user A's credentials."""
-        stash_credentials('user-a', 'my-cluster', 'PRIVATE_KEY_A')
-        stash_credentials('user-b', 'my-cluster', 'PRIVATE_KEY_B')
+        stash_credentials('user-a', 'PRIVATE_KEY_A')
+        stash_credentials('user-b', 'PRIVATE_KEY_B')
 
-        creds_a = pop_credentials('user-a', 'my-cluster')
-        creds_b = pop_credentials('user-b', 'my-cluster')
+        creds_a = pop_credentials('user-a')
+        creds_b = pop_credentials('user-b')
 
         assert creds_a is not None
         assert creds_b is not None
@@ -392,17 +392,17 @@ class TestCredentialIsolation:
 
     def test_wrong_user_gets_none(self):
         """Popping with wrong user_hash returns None."""
-        stash_credentials('user-a', 'cluster-x', 'SECRET_KEY')
-        result = pop_credentials('user-b', 'cluster-x')
+        stash_credentials('user-a', 'SECRET_KEY')
+        result = pop_credentials('user-b')
         assert result is None
         # Clean up
-        pop_credentials('user-a', 'cluster-x')
+        pop_credentials('user-a')
 
     def test_pop_is_one_shot(self):
         """Credentials can only be popped once."""
-        stash_credentials('user-a', 'cluster-y', 'ONE_TIME_KEY')
-        first = pop_credentials('user-a', 'cluster-y')
-        second = pop_credentials('user-a', 'cluster-y')
+        stash_credentials('user-a', 'ONE_TIME_KEY')
+        first = pop_credentials('user-a')
+        second = pop_credentials('user-a')
         assert first is not None
         assert second is None
 

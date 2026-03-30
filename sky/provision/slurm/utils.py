@@ -158,6 +158,50 @@ def read_credential_contents(
     return result
 
 
+def _resolve_proxy_jump(proxy_jump: Optional[str]) -> Optional[str]:
+    """Resolve a ProxyJump value through the local SSH config.
+
+    The ProxyJump may reference an SSH alias (e.g. jump.a6n.aip2.isambard)
+    that only exists in the client's SSH config. The remote API server
+    won't have this alias, so we resolve it to the actual hostname here.
+
+    Handles the format: [user@]host[:port]
+    """
+    if not proxy_jump:
+        return None
+    # Parse user@host or just host
+    user_prefix = ''
+    host = proxy_jump
+    if '@' in host:
+        user_prefix, host = host.rsplit('@', 1)
+        user_prefix += '@'
+    # Parse host:port
+    port_suffix = ''
+    if ':' in host:
+        host, port = host.rsplit(':', 1)
+        port_suffix = f':{port}'
+    # Resolve through system SSH config
+    try:
+        import subprocess  # pylint: disable=import-outside-toplevel
+        result = subprocess.run(  # pylint: disable=subprocess-run-check
+            ['ssh', '-G', host],
+            capture_output=True,
+            text=True,
+            timeout=5)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if line.startswith('hostname '):
+                    resolved = line.split(' ', 1)[1]
+                    if resolved != host:
+                        logger.debug('Resolved ProxyJump host %s -> %s', host,
+                                     resolved)
+                        host = resolved
+                    break
+    except Exception:  # pylint: disable=broad-except
+        logger.debug('Failed to resolve ProxyJump host %s', host)
+    return f'{user_prefix}{host}{port_suffix}'
+
+
 def get_slurm_credentials_for_remote() -> Optional[Dict[str, Optional[str]]]:
     """Read Slurm SSH credentials for transmission to a remote API server.
 
@@ -188,7 +232,8 @@ def get_slurm_credentials_for_remote() -> Optional[Dict[str, Optional[str]]]:
         try:
             result = read_credential_contents(identity_file, cert_file)
             result['ssh_user'] = ssh_dict.get('user')
-            result['proxy_jump'] = ssh_dict.get('proxyjump')
+            result['proxy_jump'] = _resolve_proxy_jump(
+                ssh_dict.get('proxyjump'))
             return result
         except (FileNotFoundError, ValueError):
             continue
@@ -223,9 +268,9 @@ def make_slurm_client_from_config(
     """
     ssh_user = ssh_config_dict.get('user')
     proxy_jump = ssh_config_dict.get('proxyjump')
-    if not ssh_user and cluster_name:
+    if not ssh_user:
         user_hash = os.environ.get(constants.USER_ID_ENV_VAR, '')
-        creds = peek_credentials(user_hash, cluster_name)
+        creds = peek_credentials(user_hash)
         if creds:
             ssh_user = creds.get('ssh_user')
             proxy_jump = proxy_jump or creds.get('proxy_jump')

@@ -198,12 +198,10 @@ class RequestBody(BasePayload):
         slurm_creds = kwargs.pop('slurm_credentials', None)
         # Stash credentials server-side for the provisioner to retrieve.
         # They never enter the kwargs (which may be logged/serialized).
-        # Keyed by (user_hash, cluster_name) for cross-user isolation.
+        # Keyed by user_hash for cross-user isolation.
         if slurm_creds and slurm_creds.get('private_key_content'):
-            cname = kwargs.get('cluster_name', '')
             uhash = self.user_hash or ''
             stash_credentials(uhash,
-                              cname,
                               slurm_creds['private_key_content'],
                               slurm_creds.get('certificate_content'),
                               ssh_user=slurm_creds.get('ssh_user'),

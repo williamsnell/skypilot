@@ -396,7 +396,7 @@ def _resolve_ephemeral_ssh_credentials(
         stashed.
     """
     user_hash = os.environ.get(skylet_constants.USER_ID_ENV_VAR, '')
-    creds = pop_credentials(user_hash, cluster_name)
+    creds = pop_credentials(user_hash)
     if not creds or not creds.get('private_key_content'):
         return ssh_key, None, None, None
 

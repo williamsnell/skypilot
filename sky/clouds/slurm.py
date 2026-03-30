@@ -29,7 +29,7 @@ logger = sky_logging.init_logger(__name__)
 CREDENTIAL_PATH = slurm_utils.DEFAULT_SLURM_PATH
 
 
-def _get_stashed_credential(cluster_name: str, field: str) -> Optional[str]:
+def _get_stashed_credential(field: str) -> Optional[str]:
     """Get a field from stashed ephemeral credentials (remote API server).
 
     On a remote API server, the server's ~/.sky/slurm/config may not have
@@ -39,7 +39,7 @@ def _get_stashed_credential(cluster_name: str, field: str) -> Optional[str]:
     are fully consumed during provisioning.
     """
     user_hash = os.environ.get(constants.USER_ID_ENV_VAR, '')
-    creds = peek_credentials(user_hash, cluster_name)
+    creds = peek_credentials(user_hash)
     if creds:
         return creds.get(field)
     return None
@@ -546,11 +546,10 @@ class Slurm(clouds.Cloud):
             'ssh_hostname': ssh_config_dict['hostname'],
             'ssh_port': str(ssh_config_dict.get('port', 22)),
             'ssh_user': (ssh_config_dict.get('user') or
-                         _get_stashed_credential(cluster, 'ssh_user')),
+                         _get_stashed_credential('ssh_user')),
             'slurm_proxy_command': ssh_config_dict.get('proxycommand', None),
-            'slurm_proxy_jump':
-                (ssh_config_dict.get('proxyjump') or
-                 _get_stashed_credential(cluster, 'proxy_jump')),
+            'slurm_proxy_jump': (ssh_config_dict.get('proxyjump') or
+                                 _get_stashed_credential('proxy_jump')),
             'slurm_identities_only':
                 slurm_utils.get_identities_only(ssh_config_dict),
             # TODO(jwj): Solve naming collision with 'ssh_private_key'.
@@ -689,7 +688,7 @@ class Slurm(clouds.Cloud):
             ssh_config_dict = ssh_config.lookup(cluster)
             try:
                 ssh_user = (ssh_config_dict.get('user') or
-                            _get_stashed_credential(cluster, 'ssh_user'))
+                            _get_stashed_credential('ssh_user'))
                 if not ssh_user:
                     # No user in server config or stashed credentials.
                     # This is expected on a remote API server where

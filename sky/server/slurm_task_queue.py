@@ -30,7 +30,7 @@ import os
 import secrets
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 import uuid
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -449,46 +449,35 @@ def get_task_queue() -> SlurmTaskQueue:
 # files that are cleaned up after the SSH operation completes.
 # ---------------------------------------------------------------------- #
 
-# Keyed by (user_hash, cluster_name) so different users can't access
-# each other's credentials even if they share a cluster name.
-_ephemeral_credentials: Dict[Tuple[str, str], Dict[str, Optional[str]]] = {}
+# Keyed by user_hash so different users can't access each other's
+# credentials. One set of Slurm credentials per user.
+_ephemeral_credentials: Dict[str, Dict[str, Optional[str]]] = {}
 _cred_lock = threading.Lock()
 
 
 def stash_credentials(user_hash: str,
-                      cluster_name: str,
                       private_key_content: str,
                       certificate_content: Optional[str] = None,
                       ssh_user: Optional[str] = None,
                       proxy_jump: Optional[str] = None) -> None:
     """Stash credentials in memory for the provisioner to retrieve."""
-    key = (user_hash, cluster_name)
     with _cred_lock:
-        _ephemeral_credentials[key] = {
+        _ephemeral_credentials[user_hash] = {
             'private_key_content': private_key_content,
             'certificate_content': certificate_content,
             'ssh_user': ssh_user,
             'proxy_jump': proxy_jump,
         }
-    logger.info('Stashed ephemeral credentials for user=%s cluster=%s',
-                user_hash[:8], cluster_name)
+    logger.info('Stashed ephemeral credentials for user=%s', user_hash[:8])
 
 
-def peek_credentials(
-    user_hash: str,
-    cluster_name: str,
-) -> Optional[Dict[str, Optional[str]]]:
+def peek_credentials(user_hash: str) -> Optional[Dict[str, Optional[str]]]:
     """Read credentials without removing them. Returns None if not stashed."""
-    key = (user_hash, cluster_name)
     with _cred_lock:
-        return _ephemeral_credentials.get(key)
+        return _ephemeral_credentials.get(user_hash)
 
 
-def pop_credentials(
-    user_hash: str,
-    cluster_name: str,
-) -> Optional[Dict[str, Optional[str]]]:
+def pop_credentials(user_hash: str) -> Optional[Dict[str, Optional[str]]]:
     """Pop credentials from the store. Returns None if not stashed."""
-    key = (user_hash, cluster_name)
     with _cred_lock:
-        return _ephemeral_credentials.pop(key, None)
+        return _ephemeral_credentials.pop(user_hash, None)
