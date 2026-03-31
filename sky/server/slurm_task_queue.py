@@ -319,14 +319,27 @@ class SlurmTaskQueue:
 
         Returns (exit_code, stdout, stderr).
         Raises TimeoutError if the deadline is exceeded.
+        Raises RuntimeError if the poll worker goes offline.
         """
         result_key = f'{_TASK_RESULT_KEY_PREFIX}{cluster_name}:{task_id}'
         deadline = time.time() + timeout
+        checks_since_online = 0
         while time.time() < deadline:
             raw = kv_cache.get_cache_entry(result_key)
             if raw is not None:
                 result = json.loads(raw)
                 return (result['exit_code'], result['stdout'], result['stderr'])
+            # Periodically check worker liveness so we fail fast when
+            # the poll worker is dead rather than blocking for the full
+            # timeout.  Check every few iterations to avoid DB spam.
+            checks_since_online += 1
+            if checks_since_online >= 5:
+                if not self.is_worker_online(cluster_name):
+                    raise RuntimeError(
+                        f'Poll worker for {cluster_name} is offline '
+                        f'(no heartbeat). Task {task_id} will never '
+                        f'complete.')
+                checks_since_online = 0
             time.sleep(_COMPLETION_POLL_INTERVAL)
         raise TimeoutError(
             f'Task {task_id} for {cluster_name} timed out after {timeout}s')

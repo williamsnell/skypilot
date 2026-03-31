@@ -45,13 +45,15 @@ class TestTokenManagement:
         assert t1 != t2
 
     def test_store_and_validate(self, queue):
-        token = queue.generate_token('c1')
-        queue.store_token('c1', token)
-        assert queue.validate_token('c1', token)
+        name = f'store-val-{secrets.token_hex(4)}'
+        token = queue.generate_token(name)
+        queue.store_token(name, token)
+        assert queue.validate_token(name, token)
 
     def test_validate_wrong_token(self, queue):
-        queue.store_token('c1', 'correct')
-        assert not queue.validate_token('c1', 'wrong')
+        name = f'wrong-tok-{secrets.token_hex(4)}'
+        queue.store_token(name, 'correct')
+        assert not queue.validate_token(name, 'wrong')
 
     def test_validate_no_token(self, queue):
         assert not queue.validate_token('nonexistent', 'anything')

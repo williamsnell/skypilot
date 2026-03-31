@@ -153,3 +153,36 @@ uvicorn.run(app, host='127.0.0.1', port={port}, log_level='warning')
         server_proc.terminate()
         server_proc.wait(timeout=5)
         os.unlink(pubkey_file.name)
+
+
+def test_wait_for_completion_fails_fast_when_worker_offline():
+    """wait_for_completion must not block for the full timeout when
+    the poll worker has never heartbeated.
+
+    This covers all callers of run_on_head on podman-hpc clusters:
+    teardown, job submission, sky exec, sky queue, etc. Without this
+    check, any of these operations hang for up to 3600s when the
+    container or poll worker is dead.
+    """
+    queue = SlurmTaskQueue()
+    cluster = f'offline-test-{secrets.token_hex(4)}'
+    queue.generate_keypair(cluster)
+
+    # No heartbeat — simulates dead poll worker.
+    assert not queue.is_worker_online(cluster)
+
+    task_id = queue.enqueue_task(cluster, TaskType.RUN, 'echo hello')
+
+    start = time.time()
+    try:
+        queue.wait_for_completion(cluster, task_id, timeout=30)
+        assert False, 'Should have raised when worker is offline'
+    except (TimeoutError, RuntimeError):
+        pass
+    elapsed = time.time() - start
+
+    # Should detect offline worker and fail in seconds, not minutes.
+    assert elapsed < 10, (
+        f'wait_for_completion took {elapsed:.1f}s with no heartbeat. '
+        f'Must check is_worker_online() and fail fast when the poll '
+        f'worker is dead, not block for the full timeout.')
