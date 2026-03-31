@@ -17,7 +17,6 @@ from sky.adaptors import slurm
 from sky.provision import common
 from sky.provision import constants
 from sky.provision.slurm import utils as slurm_utils
-from sky.server import common as server_common
 from sky.server.slurm_task_queue import get_task_queue
 from sky.skylet import constants as skylet_constants
 from sky.utils import command_runner
@@ -637,7 +636,15 @@ def _create_virtual_instance(
     poll_pubkey_b64 = None
     api_server_url = None
     if container_runtime == 'podman-hpc':
-        import base64  # pylint: disable=import-outside-toplevel
+        # pylint: disable=import-outside-toplevel
+        import base64
+
+        # Import inside function to avoid circular import:
+        # sky.clouds → sky.provision.slurm.instance → sky.server.common
+        # → sky.data → sky.data.storage → sky.clouds.AWS()
+        from sky.server import common as server_common
+
+        # pylint: enable=import-outside-toplevel
 
         queue = get_task_queue()
         poll_token = queue.generate_token(cluster_name_on_cloud)
