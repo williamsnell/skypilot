@@ -608,20 +608,21 @@ def get_jobs_info(user_hash: Optional[str] = None,
     jobs_info = []
     for job in jobs:
         jobs_info.append(
-            jobsv1_pb2.JobInfo(job_id=job['job_id'],
-                               job_name=job['job_name'],
-                               username=job['username'],
-                               submitted_at=job['submitted_at'],
-                               status=job['status'].to_protobuf(),
-                               run_timestamp=job['run_timestamp'],
-                               start_at=job['start_at'],
-                               end_at=job['end_at'],
-                               resources=job['resources'],
-                               pid=job['pid'],
-                               log_path=os.path.join(
-                                   constants.SKY_LOGS_DIRECTORY,
-                                   job['run_timestamp']),
-                               metadata=json.dumps(job['metadata'])))
+            jobsv1_pb2.JobInfo(
+                job_id=job['job_id'],
+                job_name=job['job_name'],
+                username=job['username'],
+                submitted_at=job['submitted_at'],
+                status=job['status'].to_protobuf(),
+                run_timestamp=job['run_timestamp'],
+                start_at=job['start_at'],
+                end_at=job['end_at'],
+                resources=job['resources'],
+                pid=job['pid'],
+                log_path=(job['log_dir'] if job.get('log_dir') is not None else
+                          os.path.join(constants.SKY_LOGS_DIRECTORY,
+                                       job['run_timestamp'])),
+                metadata=json.dumps(job['metadata'])))
     return jobs_info
 
 
@@ -730,6 +731,7 @@ def _get_records_from_rows(rows) -> List[Dict[str, Any]]:
             'end_at': row[JobInfoLoc.END_AT.value],
             'resources': row[JobInfoLoc.RESOURCES.value],
             'pid': row[JobInfoLoc.PID.value],
+            'log_dir': row[JobInfoLoc.LOG_PATH.value],
             'metadata': json.loads(row[JobInfoLoc.METADATA.value]),
         })
         if int(constants.SKYLET_VERSION) >= 28:
@@ -1010,8 +1012,13 @@ def dump_job_queue(user_hash: Optional[str], all_jobs: bool) -> str:
     jobs = _get_jobs(user_hash, status_list=status_list)
     for job in jobs:
         job['status'] = job['status'].value
-        job['log_path'] = os.path.join(constants.SKY_LOGS_DIRECTORY,
-                                       job.pop('run_timestamp'))
+        log_dir = job.pop('log_dir', None)
+        run_timestamp = job.pop('run_timestamp')
+        if log_dir is not None:
+            job['log_path'] = log_dir
+        else:
+            job['log_path'] = os.path.join(constants.SKY_LOGS_DIRECTORY,
+                                           run_timestamp)
     return message_utils.encode_payload(jobs)
 
 
