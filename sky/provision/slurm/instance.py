@@ -655,7 +655,7 @@ def _create_virtual_instance(
         # reachable URL (from SKYPILOT_API_SERVER_ENDPOINT env var or
         # api_server.endpoint in config). The poll worker on the compute
         # node must be able to reach this URL.
-        api_server_url = server_common.get_server_url()
+        api_server_url = server_common.get_server_global_url()
 
     # Build custom sbatch directives from user config.
     custom_sbatch_directives = _build_custom_sbatch_directives(
