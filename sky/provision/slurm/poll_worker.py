@@ -38,7 +38,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 logger = logging.getLogger('sky.poll_worker')
 
 _POLL_INTERVAL = 2  # seconds between task polls
-_HEARTBEAT_INTERVAL = 30  # seconds between heartbeats
+_HEARTBEAT_INTERVAL = float(
+    os.environ.get('SKYPILOT_POLL_HEARTBEAT_INTERVAL', '30'))
 _INITIAL_BACKOFF = 5  # seconds on HTTP error
 _MAX_BACKOFF = 60  # max backoff
 
@@ -195,24 +196,40 @@ def _execute_task(task: dict) -> tuple:
             pass
 
 
+def _heartbeat_loop(api_server_url: str, cluster_name: str, token: str) -> None:
+    """Send heartbeats in a background thread.
+
+    Runs independently of the main poll/execute loop so heartbeats
+    continue even while a long-running task is executing. This lets
+    is_worker_online() accurately reflect liveness.
+    """
+    while True:
+        try:
+            _send_heartbeat(api_server_url, cluster_name, token)
+            logger.debug('Heartbeat sent')
+        except Exception:  # pylint: disable=broad-except
+            logger.debug('Heartbeat failed', exc_info=True)
+        time.sleep(_HEARTBEAT_INTERVAL)
+
+
 def run(api_server_url: str, cluster_name: str, token: str,
         server_pubkey: Ed25519PublicKey) -> None:
     """Main poll loop. Runs until the process is killed."""
     logger.info('Poll worker starting: cluster=%s server=%s', cluster_name,
                 api_server_url)
 
-    last_heartbeat = 0.0
+    # Start heartbeat in a daemon thread so it continues during
+    # task execution (subprocess.run blocks the main thread).
+    import threading  # pylint: disable=import-outside-toplevel
+    hb_thread = threading.Thread(target=_heartbeat_loop,
+                                 args=(api_server_url, cluster_name, token),
+                                 daemon=True)
+    hb_thread.start()
+
     backoff = _INITIAL_BACKOFF
 
     while True:
         try:
-            # Heartbeat
-            now = time.time()
-            if now - last_heartbeat >= _HEARTBEAT_INTERVAL:
-                _send_heartbeat(api_server_url, cluster_name, token)
-                last_heartbeat = time.time()
-                logger.debug('Heartbeat sent')
-
             # Poll for task
             task, nonce = _poll_for_task(api_server_url, cluster_name, token)
             if task is not None:
