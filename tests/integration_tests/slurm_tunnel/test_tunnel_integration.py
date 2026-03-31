@@ -10,6 +10,7 @@ Run inside the testrunner container:
 Or on the host (requires Slurm cluster running via compose):
     python -m pytest tests/integration_tests/slurm_tunnel/ -v
 """
+import os
 import subprocess
 import time
 
@@ -284,6 +285,54 @@ class TestTerminateInstances:
         # Should not raise — job doesn't exist.
         terminate_instances('nonexistent-cluster-xyz',
                             provider_config=provider_config)
+
+
+class TestSSHCertificateExpiry:
+    """Test that expired SSH certificates are caught before SSH."""
+
+    def test_terminate_with_expired_cert_raises(self, slurm_cluster):
+        """terminate_instances with an expired certificate must raise
+        SSHCertificateExpiredError, not a cryptic SSH error.
+
+        This is the code path hit by sky down when the user's SSH
+        certificate has expired since launch.
+        """
+        import tempfile
+
+        from sky import exceptions
+        from sky.provision.slurm.instance import terminate_instances
+
+        tmpdir = tempfile.mkdtemp()
+        ca_key = os.path.join(tmpdir, 'ca')
+        user_key = os.path.join(tmpdir, 'user')
+
+        # Generate an expired certificate.
+        subprocess.run(['ssh-keygen', '-t', 'ed25519', '-f', ca_key, '-N', ''],
+                       check=True,
+                       capture_output=True)
+        subprocess.run(
+            ['ssh-keygen', '-t', 'ed25519', '-f', user_key, '-N', ''],
+            check=True,
+            capture_output=True)
+        subprocess.run([
+            'ssh-keygen', '-s', ca_key, '-I', 'test-expired', '-V', '-1d:-1s',
+            user_key + '.pub'
+        ],
+                       check=True,
+                       capture_output=True)
+
+        provider_config = {
+            'ssh': {
+                'hostname': slurm_cluster['host'],
+                'port': slurm_cluster['port'],
+                'user': slurm_cluster['user'],
+                'private_key': user_key,
+                'certificate_file': user_key + '-cert.pub',
+            }
+        }
+
+        with pytest.raises(exceptions.SSHCertificateExpiredError):
+            terminate_instances('some-cluster', provider_config=provider_config)
 
 
 class TestTokenRejection:

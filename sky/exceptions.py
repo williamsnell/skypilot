@@ -126,6 +126,15 @@ def deserialize_exception(serialized: Dict[str, Any]) -> Exception:
     return e
 
 
+class SSHCertificateExpiredError(Exception):
+    """SSH certificate has expired.
+
+    Raised before attempting SSH when the configured certificate file
+    has a validity period that has already ended. This gives a clear
+    error message instead of a cryptic SSH failure.
+    """
+
+
 class CloudError(Exception):
     """Wraps cloud-specific errors into a SkyPilot exception."""
 

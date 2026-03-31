@@ -1,4 +1,5 @@
 """Runner for commands to be executed on the cluster."""
+import datetime
 import enum
 import fcntl
 import hashlib
@@ -89,6 +90,50 @@ def _ssh_control_path(ssh_control_filename: Optional[str]) -> Optional[str]:
     path = f'/tmp/skypilot_ssh_{user_hash}/{ssh_control_filename}'
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _check_ssh_certificate_expiry(cert_path: str) -> None:
+    """Check if an SSH certificate has expired.
+
+    Parses the certificate with ssh-keygen -L and checks the
+    'Valid:' line for the expiry timestamp. Raises
+    SSHCertificateExpiredError if the certificate has expired.
+    """
+    expanded = os.path.expanduser(cert_path)
+    if not os.path.exists(expanded):
+        return  # Missing cert will fail at SSH time with a clear error.
+    try:
+        result = subprocess.run(  # pylint: disable=subprocess-run-check
+            ['ssh-keygen', '-L', '-f', expanded],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return
+        # Parse "Valid: from YYYY-MM-DDTHH:MM:SS to YYYY-MM-DDTHH:MM:SS"
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith('Valid:') and ' to ' in line:
+                to_str = line.split(' to ')[-1].strip()
+                if to_str == 'forever':
+                    return
+                try:
+                    expiry = datetime.datetime.fromisoformat(to_str)
+                except ValueError:
+                    try:
+                        expiry = datetime.datetime.strptime(
+                            to_str, '%Y-%m-%dT%H:%M:%S')
+                    except ValueError:
+                        return  # Can't parse, let SSH handle it.
+                if expiry < datetime.datetime.now():
+                    raise exceptions.SSHCertificateExpiredError(
+                        f'SSH certificate {cert_path} expired at '
+                        f'{to_str}. Please renew your certificate '
+                        f'(e.g., run sky setup-slurm-ssh).')
+                return
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # ssh-keygen not available; let SSH handle it.
 
 
 def _is_skypilot_managed_key(key_path: str) -> bool:
@@ -946,6 +991,8 @@ class SSHCommandRunner(CommandRunner):
         ip, port = node
         self.ssh_private_key = ssh_private_key
         self.ssh_certificate_file = ssh_certificate_file
+        if ssh_certificate_file is not None:
+            _check_ssh_certificate_expiry(ssh_certificate_file)
         self.ssh_control_name = (
             None if ssh_control_name is None else hashlib.md5(
                 ssh_control_name.encode()).hexdigest()[:_HASH_MAX_LENGTH])
