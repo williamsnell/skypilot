@@ -205,6 +205,87 @@ class TestSignatureRejection:
         assert 'Signature verification failed' in stderr
 
 
+class TestTerminateInstances:
+    """Test that terminate_instances cancels Slurm jobs via scancel."""
+
+    def test_running_job_is_cancelled(self, slurm_cluster):
+        """Submit a sleep job, call terminate_instances, verify it's gone."""
+        cluster_name = f'terminate-test-{int(time.time())}'
+        ssh_cmd = [
+            'ssh',
+            '-o',
+            'StrictHostKeyChecking=no',
+            '-o',
+            'UserKnownHostsFile=/dev/null',
+            '-i',
+            slurm_cluster['ssh_key'],
+            '-p',
+            str(slurm_cluster['port']),
+            f'{slurm_cluster["user"]}@{slurm_cluster["host"]}',
+        ]
+
+        # Submit a sleep job with a known name.
+        # Quote the entire sbatch command to avoid SSH arg splitting.
+        result = subprocess.run(
+            ssh_cmd +
+            ['sbatch', '--job-name', cluster_name, '--wrap', '"sleep 300"'],
+            capture_output=True,
+            text=True,
+            timeout=10)
+        assert result.returncode == 0, f'sbatch failed: {result.stderr}'
+        assert 'Submitted batch job' in result.stdout
+
+        # Verify job is running/pending.
+        result = subprocess.run(ssh_cmd + [
+            'squeue', '--name', cluster_name, '--noheader', '--format=%i %j %T'
+        ],
+                                capture_output=True,
+                                text=True,
+                                timeout=10)
+        assert result.stdout.strip(), (
+            f'Job not found after sbatch: {result.stdout}')
+
+        # Call terminate_instances with SSH config.
+        from sky.provision.slurm.instance import terminate_instances
+        provider_config = {
+            'ssh': {
+                'hostname': slurm_cluster['host'],
+                'port': slurm_cluster['port'],
+                'user': slurm_cluster['user'],
+                'private_key': slurm_cluster['ssh_key'],
+            }
+        }
+        terminate_instances(cluster_name, provider_config=provider_config)
+
+        # Verify job is cancelled.
+        time.sleep(1)
+        result = subprocess.run(ssh_cmd + [
+            'sacct', '--name', cluster_name, '--noheader', '--format=State',
+            '--parsable2'
+        ],
+                                capture_output=True,
+                                text=True,
+                                timeout=10)
+        states = [s.strip() for s in result.stdout.strip().split('\n') if s]
+        assert any('CANCEL' in s for s in states), (
+            f'Job was not cancelled. States: {states}')
+
+    def test_already_terminated_job_is_noop(self, slurm_cluster):
+        """terminate_instances on a nonexistent job should not raise."""
+        from sky.provision.slurm.instance import terminate_instances
+        provider_config = {
+            'ssh': {
+                'hostname': slurm_cluster['host'],
+                'port': slurm_cluster['port'],
+                'user': slurm_cluster['user'],
+                'private_key': slurm_cluster['ssh_key'],
+            }
+        }
+        # Should not raise — job doesn't exist.
+        terminate_instances('nonexistent-cluster-xyz',
+                            provider_config=provider_config)
+
+
 class TestTokenRejection:
     """Test that invalid tokens are rejected by the mini server."""
 

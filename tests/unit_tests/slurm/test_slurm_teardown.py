@@ -9,6 +9,10 @@ Test 2: wait_for_completion must fail fast when the poll worker is
 genuinely offline (never heartbeated), rather than blocking for the
 full timeout. This prevents sky down, sky exec, etc. from hanging
 when the container or poll worker has died.
+
+Test 3: teardown_no_lock must complete quickly for Slurm clusters
+even when the poll worker is offline (the normal case during
+teardown, since the container is being killed).
 """
 import os
 import secrets
@@ -17,10 +21,14 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest import mock
 
+from sky.backends import cloud_vm_ray_backend
+from sky.clouds import cloud as cloud_mod
 from sky.server.slurm_task_queue import get_task_queue
 from sky.server.slurm_task_queue import SlurmTaskQueue
 from sky.server.slurm_task_queue import TaskType
+from sky.utils import status_lib
 
 
 def _free_port() -> int:
@@ -186,3 +194,65 @@ def test_wait_for_completion_fails_fast_when_worker_offline():
         f'wait_for_completion took {elapsed:.1f}s with no heartbeat. '
         f'Must check is_worker_online() and fail fast when the poll '
         f'worker is dead, not block for the full timeout.')
+
+
+def test_teardown_completes_quickly_for_slurm():
+    """sky down on a Slurm cluster must complete quickly even when
+    the poll worker is offline.
+
+    This exercises the real teardown_no_lock code path with a Slurm
+    handle. Only infrastructure calls (SSH, provisioner) are mocked.
+    The task queue run_on_head path runs for real — if it hangs,
+    this test will fail on the time assertion.
+    """
+    backend = cloud_vm_ray_backend.CloudVmRayBackend()
+
+    # Build a mock handle that looks like a Slurm+podman-hpc cluster.
+    mock_cloud = mock.MagicMock(spec=cloud_mod.Cloud)
+    mock_cloud.uses_ray.return_value = False
+    mock_cloud.PROVISIONER_VERSION = cloud_mod.ProvisionerVersion.SKYPILOT
+    mock_cloud.__repr__ = mock.Mock(return_value='Slurm')
+
+    class FakeResources:
+        pass
+
+    mock_resources = FakeResources()
+    mock_resources.cloud = mock_cloud
+    mock_resources.assert_launchable = lambda: mock_resources
+
+    cluster_name = f'teardown-test-{secrets.token_hex(4)}'
+    mock_handle = mock.MagicMock()
+    mock_handle.launched_resources = mock_resources
+    mock_handle.cluster_name = cluster_name
+    mock_handle.cluster_name_on_cloud = f'{cluster_name}-abc123'
+    mock_handle.cluster_yaml = '/tmp/fake.yaml'
+
+    mock_teardown = mock.patch('sky.provision.provisioner.teardown_cluster')
+
+    with mock_teardown as teardown_cluster, \
+         mock.patch('sky.backends.backend_utils'
+                    '.refresh_cluster_status_handle',
+                    return_value=(status_lib.ClusterStatus.UP,
+                                 mock_handle)), \
+         mock.patch('sky.global_user_state.remove_cluster'), \
+         mock.patch('sky.global_user_state.get_cluster_yaml_dict',
+                    return_value={'provider': {}}), \
+         mock.patch.object(backend, 'post_teardown_cleanup'):
+
+        start = time.time()
+        backend.teardown_no_lock(mock_handle, terminate=True, purge=False)
+        elapsed = time.time() - start
+
+    assert elapsed < 15, (
+        f'teardown_no_lock took {elapsed:.1f}s for a Slurm cluster. '
+        f'Must complete quickly even when the poll worker is offline.')
+
+    # Verify provisioner.teardown_cluster was called with the right
+    # cluster name (it runs scancel --name={cluster_name_on_cloud}).
+    # The actual scancel behavior is tested in the integration tests
+    # (test_tunnel_integration.py::TestTerminateInstances).
+    teardown_cluster.assert_called_once()
+    call_args = teardown_cluster.call_args
+    assert cluster_name in str(call_args), (
+        f'teardown_cluster not called with cluster name {cluster_name}: '
+        f'{call_args}')
