@@ -96,10 +96,12 @@ class TestTaskExecution:
         assert _wait_for_heartbeat(task_queue, cluster), \
             'Worker not online'
 
-        future = task_queue.enqueue_task(cluster, TaskType.SETUP,
-                                         'echo "setup-output-42"')
+        task_id = task_queue.enqueue_task(cluster, TaskType.SETUP,
+                                          'echo "setup-output-42"')
 
-        exit_code, stdout, stderr = future.result(timeout=15)
+        exit_code, stdout, stderr = task_queue.wait_for_completion(cluster,
+                                                                   task_id,
+                                                                   timeout=15)
         assert exit_code == 0, f'Setup failed: stderr={stderr}'
         assert 'setup-output-42' in stdout
 
@@ -109,10 +111,12 @@ class TestTaskExecution:
         assert _wait_for_heartbeat(task_queue, cluster), \
             'Worker not online'
 
-        future = task_queue.enqueue_task(cluster, TaskType.RUN,
-                                         'echo "run-result-99"')
+        task_id = task_queue.enqueue_task(cluster, TaskType.RUN,
+                                          'echo "run-result-99"')
 
-        exit_code, stdout, stderr = future.result(timeout=15)
+        exit_code, stdout, stderr = task_queue.wait_for_completion(cluster,
+                                                                   task_id,
+                                                                   timeout=15)
         assert exit_code == 0, f'Run failed: stderr={stderr}'
         assert 'run-result-99' in stdout
 
@@ -123,9 +127,11 @@ class TestTaskExecution:
         assert _wait_for_heartbeat(task_queue, cluster), \
             'Worker not online'
 
-        future = task_queue.enqueue_task(cluster, TaskType.SETUP, 'exit 42')
+        task_id = task_queue.enqueue_task(cluster, TaskType.SETUP, 'exit 42')
 
-        exit_code, stdout, stderr = future.result(timeout=15)
+        exit_code, stdout, stderr = task_queue.wait_for_completion(cluster,
+                                                                   task_id,
+                                                                   timeout=15)
         assert exit_code == 42
 
     def test_env_vars(self, poll_worker_proc, cluster_credentials, task_queue):
@@ -134,12 +140,14 @@ class TestTaskExecution:
         assert _wait_for_heartbeat(task_queue, cluster), \
             'Worker not online'
 
-        future = task_queue.enqueue_task(cluster,
-                                         TaskType.SETUP,
-                                         'echo "VAL=$MY_TEST_VAR"',
-                                         env_vars={'MY_TEST_VAR': 'hello123'})
+        task_id = task_queue.enqueue_task(cluster,
+                                          TaskType.SETUP,
+                                          'echo "VAL=$MY_TEST_VAR"',
+                                          env_vars={'MY_TEST_VAR': 'hello123'})
 
-        exit_code, stdout, stderr = future.result(timeout=15)
+        exit_code, stdout, stderr = task_queue.wait_for_completion(cluster,
+                                                                   task_id,
+                                                                   timeout=15)
         assert exit_code == 0, f'Failed: stderr={stderr}'
         assert 'VAL=hello123' in stdout
 
@@ -150,13 +158,13 @@ class TestTaskExecution:
         assert _wait_for_heartbeat(task_queue, cluster), \
             'Worker not online'
 
-        f1 = task_queue.enqueue_task(cluster, TaskType.SETUP, 'echo "first"')
-        f2 = task_queue.enqueue_task(cluster, TaskType.SETUP, 'echo "second"')
-        f3 = task_queue.enqueue_task(cluster, TaskType.SETUP, 'echo "third"')
+        t1 = task_queue.enqueue_task(cluster, TaskType.SETUP, 'echo "first"')
+        t2 = task_queue.enqueue_task(cluster, TaskType.SETUP, 'echo "second"')
+        t3 = task_queue.enqueue_task(cluster, TaskType.SETUP, 'echo "third"')
 
-        r1 = f1.result(timeout=15)
-        r2 = f2.result(timeout=15)
-        r3 = f3.result(timeout=15)
+        r1 = task_queue.wait_for_completion(cluster, t1, timeout=15)
+        r2 = task_queue.wait_for_completion(cluster, t2, timeout=15)
+        r3 = task_queue.wait_for_completion(cluster, t3, timeout=15)
 
         assert r1[0] == 0 and 'first' in r1[1]
         assert r2[0] == 0 and 'second' in r2[1]
@@ -169,7 +177,6 @@ class TestSignatureRejection:
     def test_tampered_signature_rejected(self, poll_worker_proc,
                                          cluster_credentials, task_queue):
         """Tamper with the signing key so signatures don't verify."""
-        from sky.server.slurm_task_queue import SlurmTask
         cluster = cluster_credentials['cluster_name']
         assert _wait_for_heartbeat(task_queue, cluster), \
             'Worker not online'
@@ -177,8 +184,8 @@ class TestSignatureRejection:
         # Enqueue a task, then tamper with its signature before
         # the worker picks it up. We do this by replacing the
         # cluster's signing key with a different one.
-        future = task_queue.enqueue_task(cluster, TaskType.SETUP,
-                                         'echo "SHOULD NOT RUN"')
+        task_id = task_queue.enqueue_task(cluster, TaskType.SETUP,
+                                          'echo "SHOULD NOT RUN"')
 
         # Replace the signing key — the already-queued task was signed
         # with the old key, but dequeue will re-sign with the new one.
@@ -190,7 +197,9 @@ class TestSignatureRejection:
         # the OLD public key, so verification will fail.
         task_queue.generate_keypair(cluster)
 
-        exit_code, stdout, stderr = future.result(timeout=15)
+        exit_code, stdout, stderr = task_queue.wait_for_completion(cluster,
+                                                                   task_id,
+                                                                   timeout=15)
         # Poll worker should reject and report failure
         assert exit_code == -1
         assert 'Signature verification failed' in stderr

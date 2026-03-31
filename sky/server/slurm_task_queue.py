@@ -10,6 +10,10 @@ Authentication is mutual:
     Worker → Server: random token (persisted in kv_cache)
     Server → Worker: Ed25519 signature on task payloads
 
+All task state is persisted in kv_cache (backed by SQLite/PostgreSQL) so
+that it is visible across the FastAPI server process and the backend
+executor processes.
+
 Usage (server-side):
     queue = get_task_queue()
     pubkey = queue.generate_keypair('my-cluster')
@@ -17,23 +21,24 @@ Usage (server-side):
     queue.store_token('my-cluster', token)
     # ... pass pubkey + token to sbatch script ...
 
-    future = queue.enqueue_task('my-cluster', TaskType.SETUP, script_content)
-    result = future.result(timeout=600)  # blocks until worker completes
+    task_id = queue.enqueue_task('my-cluster', TaskType.SETUP, script_content)
+    exit_code, stdout, stderr = queue.wait_for_completion(
+        'my-cluster', task_id, timeout=600)
 """
-import concurrent.futures
-from dataclasses import dataclass
-from dataclasses import field
 import enum
 import hashlib
+import json
 import logging
 import secrets
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Dict, Optional, Tuple
 import uuid
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding
+from cryptography.hazmat.primitives.serialization import NoEncryption
+from cryptography.hazmat.primitives.serialization import PrivateFormat
 from cryptography.hazmat.primitives.serialization import PublicFormat
 
 from sky.utils.db import kv_cache
@@ -44,8 +49,21 @@ _CACHE_KEY_PREFIX = 'slurm:poll_token:'
 _HEARTBEAT_CACHE_PREFIX = 'poll_heartbeat:'
 _HEARTBEAT_CACHE_TTL = 120.0  # seconds before kv_cache auto-expires entry
 
+# Task kv_cache key prefixes.
+_TASK_KEY_PREFIX = 'slurm:task:'
+_TASK_RESULT_KEY_PREFIX = 'slurm:task_result:'
+_SIGNING_KEY_PREFIX = 'slurm:signing_key:'
+
+# Task entries expire after 4 hours (covers long-running setups).
+_TASK_TTL = 4 * 3600
+# Result entries expire after 1 hour.
+_RESULT_TTL = 3600
+
 # Heartbeat older than this is considered stale.
 HEARTBEAT_TIMEOUT_SECONDS = 60.0
+
+# Polling interval when waiting for task completion.
+_COMPLETION_POLL_INTERVAL = 1.0
 
 
 class TaskType(enum.Enum):
@@ -60,50 +78,14 @@ class TaskStatus(enum.Enum):
     FAILED = 'failed'
 
 
-@dataclass
-class SlurmTask:
-    """A task queued for execution on a Slurm worker."""
-    task_id: str
-    task_type: TaskType
-    script_content: str
-    env_vars: Dict[str, str] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
-    status: TaskStatus = TaskStatus.PENDING
-
-    # Populated on completion.
-    exit_code: Optional[int] = None
-    stdout: Optional[str] = None
-    stderr: Optional[str] = None
-
-    # Signaled when the worker reports completion.
-    completion_future: concurrent.futures.Future = field(
-        default_factory=concurrent.futures.Future)
-
-
-@dataclass
-class WorkerState:
-    """Tracks a connected poll worker."""
-    cluster_name: str
-    last_heartbeat: float = field(default_factory=time.time)
-    connected_at: float = field(default_factory=time.time)
-
-
 class SlurmTaskQueue:
-    """In-memory task queue with mutual authentication.
+    """DB-backed task queue with mutual authentication.
 
-    Thread safety: all mutation is protected by a threading.Lock since
-    enqueue_task is called from backend threads while dequeue/complete
-    are called from the FastAPI event loop (via async endpoints that
-    delegate to sync helpers).
+    All task state is persisted in kv_cache so it is visible across
+    the FastAPI server process and backend executor processes.
     """
 
     def __init__(self):
-        # cluster_name -> ordered list of SlurmTask
-        self._tasks: Dict[str, List[SlurmTask]] = {}
-        # cluster_name -> WorkerState
-        self._workers: Dict[str, WorkerState] = {}
-        # cluster_name -> Ed25519PrivateKey
-        self._signing_keys: Dict[str, Ed25519PrivateKey] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
@@ -140,12 +122,7 @@ class SlurmTaskQueue:
 
     @staticmethod
     def remove_tokens(cluster_name: str) -> None:
-        """Invalidate tokens on cluster teardown.
-
-        kv_cache has no delete API, so we set the value to empty with
-        expiry 0 to effectively invalidate it. validate_token() will
-        fail because compare_digest('', any_token) is always False.
-        """
+        """Invalidate tokens on cluster teardown."""
         cache_key = f'{_CACHE_KEY_PREFIX}{cluster_name}'
         try:
             kv_cache.add_or_update_cache_entry(cache_key, '', 0)
@@ -153,38 +130,54 @@ class SlurmTaskQueue:
             logger.debug('Failed to remove poll token for %s', cluster_name)
 
     # ------------------------------------------------------------------ #
-    # Signing key management (server → worker auth, in-memory)
+    # Signing key management (server → worker auth, persisted in kv_cache)
     # ------------------------------------------------------------------ #
 
     def generate_keypair(self, cluster_name: str) -> bytes:
-        """Generate an Ed25519 keypair. Returns raw public key bytes."""
+        """Generate an Ed25519 keypair. Returns raw public key bytes.
+
+        The private key is persisted in kv_cache so the FastAPI server
+        process (which signs task payloads) can access it even when the
+        keypair was generated in a different executor process.
+        """
         private_key = Ed25519PrivateKey.generate()
-        with self._lock:
-            self._signing_keys[cluster_name] = private_key
+        # Serialize private key for DB storage.
+        raw_private = private_key.private_bytes(Encoding.Raw, PrivateFormat.Raw,
+                                                NoEncryption())
+        cache_key = f'{_SIGNING_KEY_PREFIX}{cluster_name}'
+        kv_cache.add_or_update_cache_entry(cache_key, raw_private.hex(),
+                                           time.time() + _TASK_TTL)
         public_key = private_key.public_key()
         return public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
 
-    def sign_task(self, cluster_name: str, task: SlurmTask, nonce: str) -> str:
+    def _get_signing_key(self,
+                         cluster_name: str) -> Optional[Ed25519PrivateKey]:
+        """Load the signing key from kv_cache."""
+        cache_key = f'{_SIGNING_KEY_PREFIX}{cluster_name}'
+        raw_hex = kv_cache.get_cache_entry(cache_key)
+        if raw_hex is None:
+            return None
+        return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(raw_hex))
+
+    def sign_task(self, cluster_name: str, task_id: str, task_type: str,
+                  script_content: str, nonce: str) -> str:
         """Sign a task's canonical payload. Returns hex-encoded signature."""
-        with self._lock:
-            key = self._signing_keys.get(cluster_name)
+        key = self._get_signing_key(cluster_name)
         if key is None:
             raise ValueError(f'No signing key for cluster {cluster_name}')
-        payload = _canonical_payload(task.task_id, task.task_type.value,
-                                     task.script_content, nonce)
+        payload = _canonical_payload(task_id, task_type, script_content, nonce)
         signature = key.sign(payload)
         return signature.hex()
 
     def get_public_key_bytes(self, cluster_name: str) -> Optional[bytes]:
         """Get the raw public key bytes for a cluster."""
-        with self._lock:
-            key = self._signing_keys.get(cluster_name)
+        key = self._get_signing_key(cluster_name)
         if key is None:
             return None
         return key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
     # ------------------------------------------------------------------ #
-    # Task lifecycle
+    # Task lifecycle (DB-backed)
     # ------------------------------------------------------------------ #
 
     def enqueue_task(
@@ -193,48 +186,88 @@ class SlurmTaskQueue:
         task_type: TaskType,
         script_content: str,
         env_vars: Optional[Dict[str, str]] = None,
-    ) -> concurrent.futures.Future:
-        """Enqueue a task for the worker. Returns a Future resolved on
-        completion with a (exit_code, stdout, stderr) tuple."""
-        task = SlurmTask(
-            task_id=uuid.uuid4().hex[:12],
-            task_type=task_type,
-            script_content=script_content,
-            env_vars=env_vars or {},
-        )
-        with self._lock:
-            self._tasks.setdefault(cluster_name, []).append(task)
-        logger.info('Enqueued %s task %s for %s', task_type.value, task.task_id,
+    ) -> str:
+        """Enqueue a task for the worker. Returns the task_id.
+
+        Use wait_for_completion() to block until the worker reports back.
+        """
+        task_id = uuid.uuid4().hex[:12]
+        task_data = {
+            'task_id': task_id,
+            'task_type': task_type.value,
+            'script_content': script_content,
+            'env_vars': env_vars or {},
+            'status': TaskStatus.PENDING.value,
+            'created_at': time.time(),
+        }
+        cache_key = f'{_TASK_KEY_PREFIX}{cluster_name}:{task_id}'
+        kv_cache.add_or_update_cache_entry(cache_key, json.dumps(task_data),
+                                           time.time() + _TASK_TTL)
+        self._add_to_index(cluster_name, task_id)
+        logger.info('Enqueued %s task %s for %s', task_type.value, task_id,
                     cluster_name)
-        return task.completion_future
+        return task_id
 
     def dequeue_task(self, cluster_name: str,
                      nonce: str) -> Optional[Dict[str, object]]:
         """Get the next pending task as a serializable dict with signature.
 
         Returns None if no pending tasks. Marks the task as RUNNING.
-        The nonce (from the worker's poll request) is included in the
-        signature so the response cannot be replayed.
         """
-        with self._lock:
-            tasks = self._tasks.get(cluster_name, [])
-            task = None
-            for t in tasks:
-                if t.status == TaskStatus.PENDING:
-                    t.status = TaskStatus.RUNNING
-                    task = t
-                    break
-        if task is None:
+        # Look up pending tasks for this cluster by scanning known task keys.
+        # Since tasks are processed one at a time (executor blocks on each),
+        # there's typically 0 or 1 pending task.
+        task_data = self._find_pending_task(cluster_name)
+        if task_data is None:
             return None
-        signature = self.sign_task(cluster_name, task, nonce)
+
+        # Mark as RUNNING.
+        task_data['status'] = TaskStatus.RUNNING.value
+        cache_key = (f'{_TASK_KEY_PREFIX}{cluster_name}:'
+                     f'{task_data["task_id"]}')
+        kv_cache.add_or_update_cache_entry(cache_key, json.dumps(task_data),
+                                           time.time() + _TASK_TTL)
+
+        signature = self.sign_task(cluster_name, task_data['task_id'],
+                                   task_data['task_type'],
+                                   task_data['script_content'], nonce)
         return {
-            'task_id': task.task_id,
-            'task_type': task.task_type.value,
-            'script_content': task.script_content,
-            'env_vars': task.env_vars,
+            'task_id': task_data['task_id'],
+            'task_type': task_data['task_type'],
+            'script_content': task_data['script_content'],
+            'env_vars': task_data.get('env_vars', {}),
             'nonce': nonce,
             'signature': signature,
         }
+
+    def _find_pending_task(self, cluster_name: str) -> Optional[dict]:
+        """Find the oldest pending task for a cluster.
+
+        Uses the task index key to look up task IDs without scanning.
+        """
+        index_key = f'{_TASK_KEY_PREFIX}{cluster_name}:__index__'
+        index_raw = kv_cache.get_cache_entry(index_key)
+        if not index_raw:
+            return None
+        task_ids = json.loads(index_raw)
+        for task_id in task_ids:
+            cache_key = f'{_TASK_KEY_PREFIX}{cluster_name}:{task_id}'
+            raw = kv_cache.get_cache_entry(cache_key)
+            if raw is None:
+                continue
+            task_data = json.loads(raw)
+            if task_data.get('status') == TaskStatus.PENDING.value:
+                return task_data
+        return None
+
+    def _add_to_index(self, cluster_name: str, task_id: str) -> None:
+        """Add a task_id to the cluster's task index."""
+        index_key = f'{_TASK_KEY_PREFIX}{cluster_name}:__index__'
+        index_raw = kv_cache.get_cache_entry(index_key)
+        task_ids = json.loads(index_raw) if index_raw else []
+        task_ids.append(task_id)
+        kv_cache.add_or_update_cache_entry(index_key, json.dumps(task_ids),
+                                           time.time() + _TASK_TTL)
 
     def complete_task(
         self,
@@ -244,52 +277,67 @@ class SlurmTaskQueue:
         stdout: str = '',
         stderr: str = '',
     ) -> bool:
-        """Mark a task as completed and resolve its Future.
+        """Mark a task as completed and write the result to kv_cache.
 
         Returns True if the task was found, False otherwise.
         """
-        with self._lock:
-            tasks = self._tasks.get(cluster_name, [])
-            task = None
-            for t in tasks:
-                if t.task_id == task_id:
-                    task = t
-                    break
-            if task is None:
-                logger.warning('complete_task: unknown task %s for %s', task_id,
-                               cluster_name)
-                return False
-            task.exit_code = exit_code
-            task.stdout = stdout
-            task.stderr = stderr
-            task.status = (TaskStatus.COMPLETED
-                           if exit_code == 0 else TaskStatus.FAILED)
-            # Resolve the Future — unblocks the backend thread.
-            if not task.completion_future.done():
-                task.completion_future.set_result((exit_code, stdout, stderr))
+        cache_key = f'{_TASK_KEY_PREFIX}{cluster_name}:{task_id}'
+        raw = kv_cache.get_cache_entry(cache_key)
+        if raw is None:
+            logger.warning('complete_task: unknown task %s for %s', task_id,
+                           cluster_name)
+            return False
+
+        # Update task status.
+        task_data = json.loads(raw)
+        task_data['status'] = (TaskStatus.COMPLETED.value
+                               if exit_code == 0 else TaskStatus.FAILED.value)
+        kv_cache.add_or_update_cache_entry(cache_key, json.dumps(task_data),
+                                           time.time() + _RESULT_TTL)
+
+        # Write result to a separate key that wait_for_completion polls.
+        result_key = f'{_TASK_RESULT_KEY_PREFIX}{cluster_name}:{task_id}'
+        result_data = {
+            'exit_code': exit_code,
+            'stdout': stdout,
+            'stderr': stderr,
+        }
+        kv_cache.add_or_update_cache_entry(result_key, json.dumps(result_data),
+                                           time.time() + _RESULT_TTL)
+
         logger.info('Task %s for %s completed (exit_code=%d)', task_id,
                     cluster_name, exit_code)
         return True
+
+    def wait_for_completion(
+        self,
+        cluster_name: str,
+        task_id: str,
+        timeout: float = 3600,
+    ) -> Tuple[int, str, str]:
+        """Poll kv_cache until the task result appears.
+
+        Returns (exit_code, stdout, stderr).
+        Raises TimeoutError if the deadline is exceeded.
+        """
+        result_key = f'{_TASK_RESULT_KEY_PREFIX}{cluster_name}:{task_id}'
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            raw = kv_cache.get_cache_entry(result_key)
+            if raw is not None:
+                result = json.loads(raw)
+                return (result['exit_code'], result['stdout'], result['stderr'])
+            time.sleep(_COMPLETION_POLL_INTERVAL)
+        raise TimeoutError(
+            f'Task {task_id} for {cluster_name} timed out after {timeout}s')
 
     # ------------------------------------------------------------------ #
     # Heartbeat
     # ------------------------------------------------------------------ #
 
     def record_heartbeat(self, cluster_name: str) -> None:
-        """Record a heartbeat from the poll worker.
-
-        Writes to both in-memory state (for same-process fast path) and
-        the kv_cache DB (for cross-process visibility).
-        """
+        """Record a heartbeat from the poll worker."""
         now = time.time()
-        with self._lock:
-            worker = self._workers.get(cluster_name)
-            if worker is None:
-                worker = WorkerState(cluster_name=cluster_name)
-                self._workers[cluster_name] = worker
-                logger.info('Poll worker connected: %s', cluster_name)
-            worker.last_heartbeat = now
-        # Persist to DB so request executor processes can see it.
         kv_cache.add_or_update_cache_entry(
             f'{_HEARTBEAT_CACHE_PREFIX}{cluster_name}',
             str(now),
@@ -321,17 +369,19 @@ class SlurmTaskQueue:
 
     def cleanup_cluster(self, cluster_name: str) -> None:
         """Remove all state for a cluster (on teardown)."""
-        with self._lock:
-            # Cancel any pending futures so blocked threads unblock.
-            for task in self._tasks.get(cluster_name, []):
-                if not task.completion_future.done():
-                    task.completion_future.cancel()
-            self._tasks.pop(cluster_name, None)
-            self._workers.pop(cluster_name, None)
-            self._signing_keys.pop(cluster_name, None)
+        # Cancel any pending task by writing a cancellation result.
+        pending = self._find_pending_task(cluster_name)
+        if pending:
+            self.complete_task(cluster_name,
+                               pending['task_id'],
+                               exit_code=-1,
+                               stderr='Task cancelled: cluster teardown')
+
+        # Invalidate tokens, signing keys, heartbeat.
         self.remove_tokens(cluster_name)
-        # Remove heartbeat from DB.
-        _remove_heartbeat_cache(cluster_name)
+        _remove_cache_entry(f'{_SIGNING_KEY_PREFIX}{cluster_name}')
+        _remove_cache_entry(f'{_HEARTBEAT_CACHE_PREFIX}{cluster_name}')
+        _remove_cache_entry(f'{_TASK_KEY_PREFIX}{cluster_name}:__index__')
         logger.info('Cleaned up state for cluster %s', cluster_name)
 
 
@@ -340,14 +390,12 @@ class SlurmTaskQueue:
 # ---------------------------------------------------------------------- #
 
 
-def _remove_heartbeat_cache(cluster_name: str) -> None:
-    """Remove a heartbeat entry from the kv_cache DB.
-
-    Sets expires_at to 0 so get_cache_entry (which filters by
-    expiration) will no longer return it.
-    """
-    key = f'{_HEARTBEAT_CACHE_PREFIX}{cluster_name}'
-    kv_cache.add_or_update_cache_entry(key, '', expires_at=0)
+def _remove_cache_entry(key: str) -> None:
+    """Effectively remove a kv_cache entry by setting expires_at to 0."""
+    try:
+        kv_cache.add_or_update_cache_entry(key, '', expires_at=0)
+    except Exception:  # pylint: disable=broad-except
+        pass
 
 
 def _canonical_payload(task_id: str, task_type: str, script_content: str,
@@ -381,12 +429,7 @@ def create_poll_router():
             token: str = fastapi.Header(..., alias='X-Slurm-Token'),
             nonce: str = fastapi.Header(..., alias='X-Slurm-Nonce'),
     ) -> dict:
-        """Poll worker fetches the next pending task.
-
-        Returns the task payload with an Ed25519 signature (covering the
-        worker-supplied nonce for replay protection), or {"task": null}
-        if no tasks are queued.
-        """
+        """Poll worker fetches the next pending task."""
         _check_token(cluster_name, token)
         task = get_task_queue().dequeue_task(cluster_name, nonce=nonce)
         return {'task': task}

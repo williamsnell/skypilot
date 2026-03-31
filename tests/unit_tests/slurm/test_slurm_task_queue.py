@@ -1,5 +1,4 @@
 """Unit tests for sky.server.slurm_task_queue."""
-import concurrent.futures
 import multiprocessing
 import secrets
 import threading
@@ -26,7 +25,7 @@ def queue():
 @pytest.fixture
 def cluster_with_keys(queue):
     """A cluster with token and keypair configured."""
-    name = 'test-cluster'
+    name = f'test-cluster-{secrets.token_hex(4)}'
     token = queue.generate_token(name)
     queue.store_token(name, token)
     pubkey_bytes = queue.generate_keypair(name)
@@ -77,7 +76,7 @@ class TestSigningKeys:
 
     def test_sign_task(self, cluster_with_keys, queue):
         name, _, _ = cluster_with_keys
-        future = queue.enqueue_task(name, TaskType.SETUP, 'echo hi')
+        queue.enqueue_task(name, TaskType.SETUP, 'echo hi')
         task_dict = queue.dequeue_task(name, nonce=_nonce())
         assert task_dict is not None
         assert 'signature' in task_dict
@@ -146,17 +145,19 @@ class TestSigningKeys:
             pubkey.verify(sig, payload)
 
     def test_sign_no_key_raises(self, queue):
-        from sky.server.slurm_task_queue import SlurmTask
-        task = SlurmTask(task_id='x',
-                         task_type=TaskType.SETUP,
-                         script_content='echo')
         with pytest.raises(ValueError, match='No signing key'):
-            queue.sign_task('no-such-cluster', task, nonce=_nonce())
+            queue.sign_task('no-such-cluster',
+                            'x',
+                            'setup',
+                            'echo',
+                            nonce=_nonce())
 
     def test_get_public_key_bytes(self, queue):
-        queue.generate_keypair('c1')
-        assert queue.get_public_key_bytes('c1') is not None
-        assert queue.get_public_key_bytes('c2') is None
+        name = f'pubkey-test-{secrets.token_hex(4)}'
+        queue.generate_keypair(name)
+        assert queue.get_public_key_bytes(name) is not None
+        assert queue.get_public_key_bytes(
+            f'no-such-{secrets.token_hex(4)}') is None
 
 
 class TestTaskLifecycle:
@@ -190,25 +191,39 @@ class TestTaskLifecycle:
         t2 = queue.dequeue_task(name, nonce=_nonce())
         assert t2['script_content'] == 'second'
 
-    def test_complete_resolves_future(self, cluster_with_keys, queue):
+    def test_complete_and_wait(self, cluster_with_keys, queue):
         name, _, _ = cluster_with_keys
-        future = queue.enqueue_task(name, TaskType.SETUP, 'echo done')
+        task_id = queue.enqueue_task(name, TaskType.SETUP, 'echo done')
         task = queue.dequeue_task(name, nonce=_nonce())
-        queue.complete_task(name,
-                            task['task_id'],
-                            exit_code=0,
-                            stdout='done\n',
-                            stderr='')
-        exit_code, stdout, stderr = future.result(timeout=1)
+
+        # Complete in a background thread.
+        def complete():
+            time.sleep(0.2)
+            queue.complete_task(name,
+                                task['task_id'],
+                                exit_code=0,
+                                stdout='done\n',
+                                stderr='')
+
+        t = threading.Thread(target=complete)
+        t.start()
+
+        exit_code, stdout, stderr = queue.wait_for_completion(name,
+                                                              task_id,
+                                                              timeout=5)
+        t.join()
         assert exit_code == 0
         assert stdout == 'done\n'
 
     def test_complete_failure(self, cluster_with_keys, queue):
         name, _, _ = cluster_with_keys
-        future = queue.enqueue_task(name, TaskType.SETUP, 'fail')
+        task_id = queue.enqueue_task(name, TaskType.SETUP, 'fail')
         task = queue.dequeue_task(name, nonce=_nonce())
+
         queue.complete_task(name, task['task_id'], exit_code=1, stderr='error')
-        exit_code, _, stderr = future.result(timeout=1)
+        exit_code, _, stderr = queue.wait_for_completion(name,
+                                                         task_id,
+                                                         timeout=5)
         assert exit_code == 1
         assert stderr == 'error'
 
@@ -226,11 +241,11 @@ class TestTaskLifecycle:
 
     def test_cross_thread_enqueue_dequeue(self, cluster_with_keys, queue):
         name, _, _ = cluster_with_keys
-        future = None
+        task_id = None
 
         def enqueue():
-            nonlocal future
-            future = queue.enqueue_task(name, TaskType.RUN, 'threaded')
+            nonlocal task_id
+            task_id = queue.enqueue_task(name, TaskType.RUN, 'threaded')
 
         thread = threading.Thread(target=enqueue)
         thread.start()
@@ -240,11 +255,11 @@ class TestTaskLifecycle:
         assert task is not None
         assert task['script_content'] == 'threaded'
 
-    def test_future_timeout(self, cluster_with_keys, queue):
+    def test_wait_timeout(self, cluster_with_keys, queue):
         name, _, _ = cluster_with_keys
-        future = queue.enqueue_task(name, TaskType.SETUP, 'slow')
-        with pytest.raises(concurrent.futures.TimeoutError):
-            future.result(timeout=0.1)
+        task_id = queue.enqueue_task(name, TaskType.SETUP, 'slow')
+        with pytest.raises(TimeoutError):
+            queue.wait_for_completion(name, task_id, timeout=0.2)
 
 
 class TestHeartbeat:
@@ -320,6 +335,60 @@ class TestHeartbeatCrossProcess:
         assert time.time() - result['last_hb'] < 5
 
 
+def _task_enqueuer(cluster_name, result_dict):
+    """Enqueue a task in a subprocess (simulates request executor)."""
+    from sky.server.slurm_task_queue import SlurmTaskQueue
+    from sky.server.slurm_task_queue import TaskType
+    queue = SlurmTaskQueue()
+    task_id = queue.enqueue_task(cluster_name, TaskType.SETUP, 'echo cross')
+    result_dict['task_id'] = task_id
+
+
+def _task_dequeuer(cluster_name, result_dict):
+    """Dequeue a task in a subprocess (simulates FastAPI server)."""
+    import secrets as _secrets
+
+    from sky.server.slurm_task_queue import SlurmTaskQueue
+    queue = SlurmTaskQueue()
+    task = queue.dequeue_task(cluster_name, nonce=_secrets.token_hex(16))
+    result_dict['task'] = task
+
+
+class TestTaskCrossProcess:
+    """Tasks enqueued in one process must be visible in another."""
+
+    def test_cross_process_task_visible(self):
+        cluster = f'xproc-task-{secrets.token_hex(4)}'
+
+        # Set up signing key (needed for dequeue to sign).
+        queue = SlurmTaskQueue()
+        queue.generate_keypair(cluster)
+
+        # Enqueue in one process.
+        manager = multiprocessing.Manager()
+        enqueue_result = manager.dict()
+        p1 = multiprocessing.Process(target=_task_enqueuer,
+                                     args=(cluster, enqueue_result))
+        p1.start()
+        p1.join()
+        assert p1.exitcode == 0
+        assert 'task_id' in enqueue_result
+
+        # Dequeue in a different process.
+        dequeue_result = manager.dict()
+        p2 = multiprocessing.Process(target=_task_dequeuer,
+                                     args=(cluster, dequeue_result))
+        p2.start()
+        p2.join()
+        assert p2.exitcode == 0
+
+        task = dequeue_result.get('task')
+        assert task is not None, (
+            'Task enqueued in process A must be visible in process B '
+            'via kv_cache DB')
+        assert task['script_content'] == 'echo cross'
+
+
 class TestCleanup:
     """Tests for cluster cleanup."""
 
@@ -340,11 +409,17 @@ class TestCleanup:
         queue.cleanup_cluster('c1')
         assert queue.get_public_key_bytes('c1') is None
 
-    def test_cleanup_cancels_pending_futures(self, cluster_with_keys, queue):
+    def test_cleanup_completes_pending_task(self, cluster_with_keys, queue):
+        """Cleanup writes a cancellation result for pending tasks."""
         name, _, _ = cluster_with_keys
-        future = queue.enqueue_task(name, TaskType.SETUP, 'echo')
+        task_id = queue.enqueue_task(name, TaskType.SETUP, 'echo')
         queue.cleanup_cluster(name)
-        assert future.cancelled()
+        # The result should be available (cancellation).
+        exit_code, _, stderr = queue.wait_for_completion(name,
+                                                         task_id,
+                                                         timeout=1)
+        assert exit_code == -1
+        assert 'cancelled' in stderr.lower()
 
     def test_cleanup_removes_token(self, cluster_with_keys, queue):
         name, token, _ = cluster_with_keys
@@ -358,16 +433,16 @@ class TestConcurrentComplete:
     def test_concurrent_complete_no_crash(self, cluster_with_keys, queue):
         """Two threads completing the same task should not raise."""
         name, _, _ = cluster_with_keys
-        future = queue.enqueue_task(name, TaskType.SETUP, 'echo')
+        task_id = queue.enqueue_task(name, TaskType.SETUP, 'echo')
         task_dict = queue.dequeue_task(name, nonce=_nonce())
-        task_id = task_dict['task_id']
+        tid = task_dict['task_id']
 
         errors = []
 
         def complete(exit_code):
             try:
                 queue.complete_task(name,
-                                    task_id,
+                                    tid,
                                     exit_code=exit_code,
                                     stdout=f'out-{exit_code}')
             except Exception as e:
@@ -381,9 +456,11 @@ class TestConcurrentComplete:
         t2.join()
 
         assert not errors, f'Concurrent complete raised: {errors}'
-        # Future should be resolved (by whichever thread won)
-        result = future.result(timeout=1)
-        assert result[0] in (0, 1)
+        # Result should be available.
+        exit_code, stdout, _ = queue.wait_for_completion(name,
+                                                         task_id,
+                                                         timeout=1)
+        assert exit_code in (0, 1)
 
 
 class TestTokenAuthRejection:

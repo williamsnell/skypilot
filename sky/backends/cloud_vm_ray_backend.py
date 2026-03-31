@@ -3949,9 +3949,9 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 f"<< 'SKYPILOT_SETUP_EOF'\n"  # pylint: disable=invalid-string-quote
                 f'{setup_script}\n'
                 f'SKYPILOT_SETUP_EOF')
-            write_future = queue.enqueue_task(cluster_name, TaskType.SETUP,
-                                              write_cmd)
-            write_future.result(timeout=60)
+            write_task_id = queue.enqueue_task(cluster_name, TaskType.SETUP,
+                                               write_cmd)
+            queue.wait_for_completion(cluster_name, write_task_id, timeout=60)
             self._setup_cmd = (f'/bin/bash -i {remote_setup_file}'
                                f' 2>&1')
             logger.info(ux_utils.finishing_message('Setup detached.'))
@@ -3959,13 +3959,15 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
 
         logger.info(ux_utils.starting_message('Running setup on 1 VM.'))
 
-        future = queue.enqueue_task(cluster_name,
-                                    TaskType.SETUP,
-                                    setup_script,
-                                    env_vars=setup_envs)
+        task_id = queue.enqueue_task(cluster_name,
+                                     TaskType.SETUP,
+                                     setup_script,
+                                     env_vars=setup_envs)
 
         try:
-            exit_code, stdout, stderr = future.result(timeout=3600)
+            exit_code, stdout, stderr = queue.wait_for_completion(cluster_name,
+                                                                  task_id,
+                                                                  timeout=3600)
         except Exception as e:
             raise RuntimeError(
                 f'Setup task failed for {cluster_name}: {e}') from e
@@ -4027,10 +4029,12 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         # The full script: create dirs, write codegen, queue job.
         full_script = f'{mkdir_code} && {create_script_code} && {code}'
 
-        future = queue.enqueue_task(cluster_name, TaskType.RUN, full_script)
+        task_id = queue.enqueue_task(cluster_name, TaskType.RUN, full_script)
 
         try:
-            exit_code, stdout, stderr = future.result(timeout=120)
+            exit_code, stdout, stderr = queue.wait_for_completion(cluster_name,
+                                                                  task_id,
+                                                                  timeout=120)
         except Exception as e:
             raise RuntimeError(
                 f'Job submission failed for {cluster_name}: {e}') from e
@@ -5777,9 +5781,10 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         if handle.is_slurm_podman_hpc():
             queue = get_task_queue()
             cluster_name = handle.cluster_name_on_cloud
-            future = queue.enqueue_task(cluster_name, TaskType.RUN, cmd)
+            task_id = queue.enqueue_task(cluster_name, TaskType.RUN, cmd)
             try:
-                exit_code, stdout, stderr = future.result(timeout=3600)
+                exit_code, stdout, stderr = queue.wait_for_completion(
+                    cluster_name, task_id, timeout=3600)
             except Exception as e:  # pylint: disable=broad-except
                 if require_outputs:
                     return 1, '', str(e)
