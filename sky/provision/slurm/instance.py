@@ -943,6 +943,10 @@ trap 'exit 0' TERM
 
 # Create sky home directory and subdirectories for the cluster.
 mkdir -p {sky_cluster_home_dir}/sky_logs {sky_cluster_home_dir}/sky_workdir {sky_cluster_home_dir}/sky_templates {sky_cluster_home_dir}/.sky
+# Clean any leftover runtime dir from a previous job on the same node
+# (e.g. a zombie job whose cleanup trap never ran), then recreate it.
+# This prevents stale miniconda/venv dirs from breaking setup.
+srun --nodes={num_nodes} rm -rf {skypilot_runtime_dir}
 # Create sky runtime directory on each node, including .sky/sky_app
 # which is needed under the runtime dir for podman-hpc (where the
 # runtime dir is mounted as /root inside the container).

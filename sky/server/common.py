@@ -428,11 +428,17 @@ async def make_authenticated_request_async(
                                                       **kwargs)
 
 
-@annotations.lru_cache(scope='global')
 def get_server_url(host: Optional[str] = None) -> str:
     endpoint = DEFAULT_SERVER_URL
     if host is not None:
         endpoint = f'http://{host}:46580'
+
+    # Check request context first (set by executor from client env vars),
+    # then env var, then config, then default.
+    from sky.utils import context  # pylint: disable=import-outside-toplevel
+    ctx_endpoint = context.get_context_var('api_server_endpoint')
+    if ctx_endpoint is not None:
+        return ctx_endpoint.rstrip('/')
 
     url = os.environ.get(
         constants.SKY_API_SERVER_URL_ENV_VAR,

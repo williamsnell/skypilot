@@ -368,6 +368,14 @@ def override_request_env_and_config(
         request_body.env_vars.pop(
             kubernetes_adaptor.IN_CLUSTER_CONTEXT_NAME_ENV_VAR, None)
         os.environ.update(request_body.env_vars)
+        # Store the client's API server endpoint in the request context
+        # so get_server_url() can find it during provisioning. The env
+        # var propagation via os.environ is unreliable across the server's
+        # process/context model, but context vars work reliably.
+        client_endpoint = request_body.env_vars.get(
+            constants.SKY_API_SERVER_URL_ENV_VAR)
+        if client_endpoint:
+            context.set_context_var('api_server_endpoint', client_endpoint)
         # Note: may be overridden by AuthProxyMiddleware.
         # TODO(zhwu): we need to make the entire request a context available to
         # the entire request execution, so that we can access info like user

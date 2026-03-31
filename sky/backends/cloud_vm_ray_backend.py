@@ -86,6 +86,7 @@ from sky.utils import timeline
 from sky.utils import ux_utils
 from sky.utils import volume as volume_lib
 from sky.utils import yaml_utils
+from sky.utils.db import kv_cache
 from sky.utils.plugin_extensions import ExternalFailureSource
 
 if typing.TYPE_CHECKING:
@@ -3725,10 +3726,11 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                               timeout: float = 120.0) -> None:
         """Block until the poll worker sends its first heartbeat."""
         cluster_name = handle.cluster_name_on_cloud
-        queue = get_task_queue()
+        cache_key = f'poll_heartbeat:{cluster_name}'
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if queue.is_worker_online(cluster_name):
+            entry = kv_cache.get_cache_entry(cache_key)
+            if entry is not None:
                 return
             time.sleep(2)
         # Try to fetch poll worker log from the remote node for diagnostics.

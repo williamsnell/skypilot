@@ -1,5 +1,6 @@
 """Unit tests for sky.server.slurm_task_queue."""
 import concurrent.futures
+import multiprocessing
 import secrets
 import threading
 import time
@@ -249,24 +250,74 @@ class TestTaskLifecycle:
 class TestHeartbeat:
     """Tests for heartbeat tracking."""
 
+    def _unique_name(self):
+        return f'hb-test-{secrets.token_hex(4)}'
+
     def test_record_heartbeat(self, queue):
-        queue.record_heartbeat('c1')
-        assert queue.is_worker_online('c1')
+        name = self._unique_name()
+        queue.record_heartbeat(name)
+        assert queue.is_worker_online(name)
 
     def test_worker_offline(self, queue):
-        assert not queue.is_worker_online('nonexistent')
+        assert not queue.is_worker_online(f'nonexistent-{secrets.token_hex(4)}')
 
     def test_stale_heartbeat(self, queue):
-        queue.record_heartbeat('c1')
+        name = self._unique_name()
+        queue.record_heartbeat(name)
         # Simulate staleness by checking with tiny timeout
-        assert not queue.is_worker_online('c1', timeout=0.0)
+        assert not queue.is_worker_online(name, timeout=0.0)
 
     def test_get_last_heartbeat(self, queue):
-        assert queue.get_last_heartbeat('c1') is None
-        queue.record_heartbeat('c1')
-        ts = queue.get_last_heartbeat('c1')
+        name = self._unique_name()
+        assert queue.get_last_heartbeat(name) is None
+        queue.record_heartbeat(name)
+        ts = queue.get_last_heartbeat(name)
         assert ts is not None
         assert time.time() - ts < 2
+
+
+def _heartbeat_writer(cluster_name):
+    """Write a heartbeat in a subprocess (simulates uvicorn worker)."""
+    from sky.server.slurm_task_queue import SlurmTaskQueue
+    queue = SlurmTaskQueue()
+    queue.store_token(cluster_name, 'test-token')
+    queue.record_heartbeat(cluster_name)
+
+
+def _heartbeat_reader(cluster_name, result_dict):
+    """Read heartbeat in a subprocess (simulates request executor)."""
+    from sky.server.slurm_task_queue import SlurmTaskQueue
+    queue = SlurmTaskQueue()
+    result_dict['is_online'] = queue.is_worker_online(cluster_name)
+    result_dict['last_hb'] = queue.get_last_heartbeat(cluster_name)
+
+
+class TestHeartbeatCrossProcess:
+    """Heartbeat must be visible across separate processes (kv_cache DB)."""
+
+    def test_cross_process_heartbeat_visible(self):
+        cluster = f'xproc-test-{secrets.token_hex(4)}'
+
+        # Write heartbeat in one process.
+        p1 = multiprocessing.Process(target=_heartbeat_writer, args=(cluster,))
+        p1.start()
+        p1.join()
+        assert p1.exitcode == 0
+
+        # Read heartbeat in a different process.
+        manager = multiprocessing.Manager()
+        result = manager.dict()
+        p2 = multiprocessing.Process(target=_heartbeat_reader,
+                                     args=(cluster, result))
+        p2.start()
+        p2.join()
+        assert p2.exitcode == 0
+
+        assert result['is_online'], (
+            'Heartbeat written in process A must be visible in process B '
+            'via kv_cache DB')
+        assert result['last_hb'] is not None
+        assert time.time() - result['last_hb'] < 5
 
 
 class TestCleanup:
@@ -279,9 +330,10 @@ class TestCleanup:
         assert queue.dequeue_task(name, nonce=_nonce()) is None
 
     def test_cleanup_removes_heartbeat(self, queue):
-        queue.record_heartbeat('c1')
-        queue.cleanup_cluster('c1')
-        assert not queue.is_worker_online('c1')
+        name = f'cleanup-hb-{secrets.token_hex(4)}'
+        queue.record_heartbeat(name)
+        queue.cleanup_cluster(name)
+        assert not queue.is_worker_online(name)
 
     def test_cleanup_removes_signing_key(self, queue):
         queue.generate_keypair('c1')

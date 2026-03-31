@@ -655,16 +655,22 @@ def reset_global_state():
     # Clear global caches that can leak state between tests.
     # These caches can be polluted by tests that modify the config file
     # (e.g., test_api_login sets api_server.endpoint to a test URL).
-    server_common.get_server_url.cache_clear()
-    server_common.is_api_server_local.cache_clear()
-    server_common.get_dashboard_url.cache_clear()
+    for fn in [
+            server_common.get_server_url, server_common.is_api_server_local,
+            server_common.get_dashboard_url
+    ]:
+        if hasattr(fn, 'cache_clear'):
+            fn.cache_clear()
     # Reload config from default paths to reset any in-memory config changes
     # from previous tests that might have modified the config.
     _safe_reload_config()
     yield
     # Clear again after the test to prevent pollution to subsequent tests
-    server_common.get_server_url.cache_clear()
-    server_common.is_api_server_local.cache_clear()
-    server_common.get_dashboard_url.cache_clear()
+    for fn in [
+            server_common.get_server_url, server_common.is_api_server_local,
+            server_common.get_dashboard_url
+    ]:
+        if hasattr(fn, 'cache_clear'):
+            fn.cache_clear()
     # Reload config again to reset any changes made by this test
     _safe_reload_config()

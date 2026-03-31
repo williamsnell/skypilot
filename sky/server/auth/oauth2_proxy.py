@@ -100,6 +100,11 @@ class OAuth2ProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
             # Already authenticated
             return await call_next(request)
 
+        if request.url.path.startswith('/slurm/tasks/'):
+            # Slurm poll worker endpoints use their own token-based auth
+            # (X-Slurm-Token header), not OAuth2.
+            return await call_next(request)
+
         if loopback.is_loopback_request(request):
             return await call_next(request)
 

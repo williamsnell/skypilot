@@ -103,7 +103,16 @@ def _http_request(url: str,
                   extra_headers: Optional[dict] = None) -> dict:
     """Make an HTTP request with the poll token."""
     _require_https(url)
-    headers = {'X-Slurm-Token': token}
+    headers = {
+        'X-Slurm-Token': token,
+        # Pass ingress-level auth (e.g. oauth2-proxy) which skips
+        # requests with Bearer sky_* tokens. The actual authentication
+        # is done by the X-Slurm-Token header at the endpoint level.
+        'Authorization': 'Bearer sky_slurm_poll',
+        # Override default Python-urllib User-Agent which is blocked by
+        # Cloudflare's bot detection (error 1010).
+        'User-Agent': 'skypilot-poll-worker/1.0',
+    }
     if extra_headers:
         headers.update(extra_headers)
     body = None

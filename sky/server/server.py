@@ -320,6 +320,11 @@ class BasicAuthMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
             _try_set_basic_auth_user(request)
             return await call_next(request)
 
+        if request.url.path.startswith('/slurm/tasks/'):
+            # Slurm poll worker endpoints use their own token-based auth
+            # (X-Slurm-Token header), not Basic Auth.
+            return await call_next(request)
+
         auth_header = request.headers.get('authorization')
         if not auth_header:
             return _basic_auth_401_response('Authentication required')
@@ -379,6 +384,11 @@ class BearerTokenMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
         """
         # If a previous middleware already authenticated the user, pass through
         if request.state.auth_user is not None:
+            return await call_next(request)
+
+        if request.url.path.startswith('/slurm/tasks/'):
+            # Slurm poll worker endpoints use their own token-based auth
+            # (X-Slurm-Token header), not service account tokens.
             return await call_next(request)
 
         has_skypilot_auth_header = (

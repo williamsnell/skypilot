@@ -41,6 +41,8 @@ from sky.utils.db import kv_cache
 logger = logging.getLogger(__name__)
 
 _CACHE_KEY_PREFIX = 'slurm:poll_token:'
+_HEARTBEAT_CACHE_PREFIX = 'poll_heartbeat:'
+_HEARTBEAT_CACHE_TTL = 120.0  # seconds before kv_cache auto-expires entry
 
 # Heartbeat older than this is considered stale.
 HEARTBEAT_TIMEOUT_SECONDS = 60.0
@@ -274,14 +276,24 @@ class SlurmTaskQueue:
     # ------------------------------------------------------------------ #
 
     def record_heartbeat(self, cluster_name: str) -> None:
-        """Record a heartbeat from the poll worker."""
+        """Record a heartbeat from the poll worker.
+
+        Writes to both in-memory state (for same-process fast path) and
+        the kv_cache DB (for cross-process visibility).
+        """
+        now = time.time()
         with self._lock:
             worker = self._workers.get(cluster_name)
             if worker is None:
                 worker = WorkerState(cluster_name=cluster_name)
                 self._workers[cluster_name] = worker
                 logger.info('Poll worker connected: %s', cluster_name)
-            worker.last_heartbeat = time.time()
+            worker.last_heartbeat = now
+        # Persist to DB so request executor processes can see it.
+        kv_cache.add_or_update_cache_entry(
+            f'{_HEARTBEAT_CACHE_PREFIX}{cluster_name}',
+            str(now),
+            expires_at=now + _HEARTBEAT_CACHE_TTL)
 
     def is_worker_online(
         self,
@@ -289,19 +301,19 @@ class SlurmTaskQueue:
         timeout: float = HEARTBEAT_TIMEOUT_SECONDS,
     ) -> bool:
         """Check if the poll worker has heartbeated recently."""
-        with self._lock:
-            worker = self._workers.get(cluster_name)
-        if worker is None:
+        entry = kv_cache.get_cache_entry(
+            f'{_HEARTBEAT_CACHE_PREFIX}{cluster_name}')
+        if entry is None:
             return False
-        return (time.time() - worker.last_heartbeat) < timeout
+        return (time.time() - float(entry)) < timeout
 
     def get_last_heartbeat(self, cluster_name: str) -> Optional[float]:
         """Return the timestamp of the last heartbeat, or None."""
-        with self._lock:
-            worker = self._workers.get(cluster_name)
-        if worker is None:
+        entry = kv_cache.get_cache_entry(
+            f'{_HEARTBEAT_CACHE_PREFIX}{cluster_name}')
+        if entry is None:
             return None
-        return worker.last_heartbeat
+        return float(entry)
 
     # ------------------------------------------------------------------ #
     # Cleanup
@@ -318,12 +330,24 @@ class SlurmTaskQueue:
             self._workers.pop(cluster_name, None)
             self._signing_keys.pop(cluster_name, None)
         self.remove_tokens(cluster_name)
+        # Remove heartbeat from DB.
+        _remove_heartbeat_cache(cluster_name)
         logger.info('Cleaned up state for cluster %s', cluster_name)
 
 
 # ---------------------------------------------------------------------- #
 # Helpers
 # ---------------------------------------------------------------------- #
+
+
+def _remove_heartbeat_cache(cluster_name: str) -> None:
+    """Remove a heartbeat entry from the kv_cache DB.
+
+    Sets expires_at to 0 so get_cache_entry (which filters by
+    expiration) will no longer return it.
+    """
+    key = f'{_HEARTBEAT_CACHE_PREFIX}{cluster_name}'
+    kv_cache.add_or_update_cache_entry(key, '', expires_at=0)
 
 
 def _canonical_payload(task_id: str, task_type: str, script_content: str,
