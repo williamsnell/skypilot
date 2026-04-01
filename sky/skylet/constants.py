@@ -107,6 +107,7 @@ SKY_UV_INSTALL_DIR = '"$HOME/.local/bin"'
 # UV_LINK_MODE=copy avoids a uv >=0.10.5 bug where clone/reflink mode
 # strips execute permissions on XFS filesystems, breaking Ray binaries.
 SKY_UV_CMD = ('UV_LINK_MODE=copy UV_SYSTEM_PYTHON=false '
+              f'UV_PYTHON_INSTALL_DIR={SKY_RUNTIME_DIR}/.uv/python '
               f'{SKY_UNSET_PYTHONPATH_AND_SET_CWD} {SKY_UV_INSTALL_DIR}/uv')
 # This won't reinstall uv if it's already installed, so it's safe to re-run.
 SKY_UV_INSTALL_CMD = (f'{SKY_UV_CMD} -V >/dev/null 2>&1 || '

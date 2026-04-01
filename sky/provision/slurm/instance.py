@@ -950,6 +950,10 @@ trap 'exit 0' TERM
 
 # Create sky home directory and subdirectories for the cluster.
 mkdir -p {sky_cluster_home_dir}/sky_logs {sky_cluster_home_dir}/sky_workdir {sky_cluster_home_dir}/sky_templates {sky_cluster_home_dir}/.sky
+# Remove stale ready signal from a previous job on the same cluster name.
+# Without this, _wait_for_job_ready finds the old file and returns before
+# the container is actually initialized.
+rm -f {ready_signal}
 # Clean any leftover runtime dir from a previous job on the same node
 # (e.g. a zombie job whose cleanup trap never ran), then recreate it.
 # This prevents stale miniconda/venv dirs from breaking setup.
