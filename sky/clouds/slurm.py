@@ -441,14 +441,15 @@ class Slurm(clouds.Cloud):
         custom_resources = resources_utils.make_ray_custom_resources_str(
             acc_dict)
 
-        # resources.memory and cpus are None if they are not explicitly set.
-        # When the user didn't specify CPU/memory, pass None so the sbatch
-        # script omits --cpus-per-task/--mem, letting the Slurm scheduler
-        # auto-allocate (e.g. per-GPU superchip allocation on Isambard).
+        # CPU/memory may be None in the instance type when the user didn't
+        # specify them (e.g. GPU-only instance type 'GPU:1'). In that case
+        # we pass None so the sbatch script omits --cpus-per-task/--mem,
+        # letting the Slurm scheduler auto-allocate (e.g. per-GPU superchip
+        # allocation on Isambard).
         s = slurm_utils.SlurmInstanceType.from_instance_type(
             resources.instance_type)
-        cpus = s.cpus if resources.cpus is not None else None
-        mem = s.memory if resources.memory is not None else None
+        cpus = s.cpus
+        mem = s.memory
         # Optionally populate accelerator information.
         acc_count = s.accelerator_count if s.accelerator_count else 0
         acc_type = s.accelerator_type if s.accelerator_type else None
@@ -519,7 +520,8 @@ class Slurm(clouds.Cloud):
             'instance_type': resources.instance_type,
             'custom_resources': custom_resources,
             'cpus': str(cpus) if cpus is not None else None,
-            'memory': str(mem) if mem is not None else None,
+            'memory': str(mem)
+                      if mem is not None else None,  # None omits from template
             'accelerator_count': str(acc_count),
             'accelerator_type': acc_type,
             'slurm_cluster': cluster,
@@ -612,13 +614,31 @@ class Slurm(clouds.Cloud):
             slurm_instance_type = (slurm_utils.SlurmInstanceType.
                                    from_instance_type(default_instance_type))
 
-            gpu_task_cpus = slurm_instance_type.cpus
-            if resources.cpus is None:
-                gpu_task_cpus = self._DEFAULT_NUM_VCPUS_WITH_GPU * acc_count
-            # Special handling to bump up memory multiplier for GPU instances
-            gpu_task_memory = (float(resources.memory.strip('+')) if
-                               resources.memory is not None else gpu_task_cpus *
-                               self._DEFAULT_MEMORY_CPU_RATIO_WITH_GPU)
+            # When the user didn't specify CPU/memory, use None so the
+            # instance type is GPU-only (e.g. 'GPU:1'). This lets the
+            # Slurm scheduler auto-allocate CPU/memory per GPU (e.g.
+            # per-GPU superchip allocation on Isambard).
+            # Use _cpus/_memory to check user intent: the .cpus/.memory
+            # properties infer values from the instance type once set.
+            user_cpus = resources._cpus  # pylint: disable=protected-access
+            user_memory = resources._memory  # pylint: disable=protected-access
+            if user_cpus is None and user_memory is None:
+                # Neither specified: GPU-only instance type.
+                gpu_task_cpus = None
+                gpu_task_memory = None
+            else:
+                # At least one specified: fill in the other with defaults.
+                if user_cpus is not None:
+                    gpu_task_cpus = slurm_instance_type.cpus
+                else:
+                    gpu_task_cpus = (self._DEFAULT_NUM_VCPUS_WITH_GPU *
+                                     acc_count)
+                if user_memory is not None:
+                    gpu_task_memory = float(user_memory.strip('+'))
+                else:
+                    assert gpu_task_cpus is not None
+                    gpu_task_memory = (gpu_task_cpus *
+                                       self._DEFAULT_MEMORY_CPU_RATIO_WITH_GPU)
 
             chosen_instance_type = (
                 slurm_utils.SlurmInstanceType.from_resources(

@@ -205,35 +205,28 @@ class TestTerminateInstances:
 
 
 class TestSlurmGPUDefaults:
-    """Test Slurm GPU default CPU and memory allocation.
+    """Test Slurm GPU CPU/memory allocation.
 
-    These tests verify that when GPU instances are requested without explicit
-    CPU/memory specifications, Slurm allocates reasonable defaults matching
-    Kubernetes behavior (4 CPUs and 16GB memory per GPU).
+    When GPU instances are requested without explicit CPU/memory, the
+    instance type should be GPU-only (cpus=None, memory=None) so the
+    Slurm scheduler can auto-allocate resources per GPU.
+
+    When CPU and/or memory are explicitly specified, they should be
+    included in the instance type.
     """
 
-    @pytest.mark.parametrize(
-        'gpu_count,expected_cpus,expected_memory',
-        [
-            (1, 4, 16.0),  # 1 GPU: 4 CPUs, 16GB
-            (2, 8, 32.0),  # 2 GPUs: 8 CPUs, 32GB
-            (4, 16, 64.0),  # 4 GPUs: 16 CPUs, 64GB
-            (8, 32, 128.0),  # 8 GPUs: 32 CPUs, 128GB
-        ])
+    @pytest.mark.parametrize('gpu_count', [1, 2, 4, 8])
     @patch('sky.clouds.slurm.Slurm.regions_with_offering')
-    def test_gpu_defaults_without_explicit_cpu_memory(self, mock_regions,
-                                                      gpu_count, expected_cpus,
-                                                      expected_memory):
-        """Test GPU instances get correct default CPU and memory allocation."""
+    def test_gpu_without_explicit_cpu_memory_is_gpu_only(
+            self, mock_regions, gpu_count):
+        """GPU instances without explicit CPU/memory produce GPU-only type."""
         mock_region = mock.MagicMock()
         mock_region.name = 'test-cluster'
         mock_regions.return_value = [mock_region]
 
-        # Create resources with GPU but no explicit CPU/memory
         resources = resources_lib.Resources(
             cloud=slurm_cloud.Slurm(),
-            accelerators={f'H200': gpu_count},
-            # No cpus or memory specified - should use defaults
+            accelerators={'H200': gpu_count},
         )
 
         cloud = slurm_cloud.Slurm()
@@ -244,28 +237,28 @@ class TestSlurmGPUDefaults:
 
         instance_type = slurm_utils.SlurmInstanceType.from_instance_type(
             resource.instance_type)
-        assert instance_type.cpus == expected_cpus
-        assert instance_type.memory == expected_memory
+        assert instance_type.cpus is None
+        assert instance_type.memory is None
         assert instance_type.accelerator_count == gpu_count
         assert instance_type.accelerator_type == 'H200'
 
     @pytest.mark.parametrize(
         'accelerators,cpus,memory,expected_cpus,expected_memory',
         [
-            # Various GPU types with defaults
+            # Various GPU types without explicit CPU/memory: GPU-only
             ({
                 'H200': 2
-            }, None, None, 8, 32.0),
+            }, None, None, None, None),
             ({
                 'A100': 2
-            }, None, None, 8, 32.0),
+            }, None, None, None, None),
             ({
                 'H100': 2
-            }, None, None, 8, 32.0),
+            }, None, None, None, None),
             ({
                 'A10G': 2
-            }, None, None, 8, 32.0),
-            # Explicit CPU override (memory scales)
+            }, None, None, None, None),
+            # Explicit CPU override (memory scales from CPU)
             ({
                 'H200': 2
             }, '16', None, 16, 64.0),
@@ -311,6 +304,121 @@ class TestSlurmGPUDefaults:
 
         assert instance_type.cpus == expected_cpus
         assert instance_type.memory == expected_memory
+
+
+class TestGPUOnlyInstanceType:
+    """Test that GPU-only instance types (no CPU/memory) are supported.
+
+    When the user requests GPUs without specifying CPU/memory, the instance
+    type should be GPU-only (e.g. 'GPU:1' instead of '4CPU--16GB--GPU:1').
+    This allows the Slurm scheduler to auto-allocate CPU/memory per GPU.
+    """
+
+    def test_gpu_only_instance_type_name(self):
+        """SlurmInstanceType with cpus=None, memory=None produces 'GPU:1'."""
+        inst = slurm_utils.SlurmInstanceType(cpus=None,
+                                             memory=None,
+                                             accelerator_count=1,
+                                             accelerator_type='GPU')
+        assert inst.name == 'GPU:1'
+
+    def test_gpu_only_instance_type_name_typed(self):
+        """SlurmInstanceType with cpus=None, memory=None, typed GPU."""
+        inst = slurm_utils.SlurmInstanceType(cpus=None,
+                                             memory=None,
+                                             accelerator_count=2,
+                                             accelerator_type='H100')
+        assert inst.name == 'H100:2'
+
+    def test_gpu_only_is_valid(self):
+        """GPU-only instance type names should be valid."""
+        assert slurm_utils.SlurmInstanceType.is_valid_instance_type('GPU:1')
+        assert slurm_utils.SlurmInstanceType.is_valid_instance_type('H100:4')
+
+    def test_gpu_only_roundtrip(self):
+        """GPU-only instance type should parse back to cpus=None, memory=None."""
+        inst = slurm_utils.SlurmInstanceType.from_instance_type('GPU:1')
+        assert inst.cpus is None
+        assert inst.memory is None
+        assert inst.accelerator_count == 1
+        assert inst.accelerator_type == 'GPU'
+
+    def test_cpu_mem_instance_type_unchanged(self):
+        """Existing CPU/memory instance types still work."""
+        inst = slurm_utils.SlurmInstanceType.from_instance_type(
+            '4CPU--16GB--GPU:1')
+        assert inst.cpus == 4.0
+        assert inst.memory == 16.0
+        assert inst.accelerator_count == 1
+        assert inst.accelerator_type == 'GPU'
+
+    def test_cpu_only_instance_type_unchanged(self):
+        """CPU-only (no GPU) instance types still work."""
+        inst = slurm_utils.SlurmInstanceType.from_instance_type('2CPU--8GB')
+        assert inst.cpus == 2.0
+        assert inst.memory == 8.0
+        assert inst.accelerator_count is None
+
+    def test_get_vcpus_mem_returns_none_for_gpu_only(self):
+        """get_vcpus_mem_from_instance_type returns (None, None) for GPU-only."""
+        vcpus, mem = slurm_cloud.Slurm.get_vcpus_mem_from_instance_type('GPU:1')
+        assert vcpus is None
+        assert mem is None
+
+    def test_catalog_gpu_no_cpu_mem_gives_gpu_only_type(self):
+        """Catalog generates GPU-only instance type when user omits CPU/mem."""
+        from sky.catalog import slurm_catalog
+        instance_type = slurm_catalog.get_default_instance_type(cpus=None,
+                                                                memory=None)
+        inst = slurm_utils.SlurmInstanceType.from_instance_type(instance_type)
+        # CPU-only with no user spec should still have defaults
+        assert inst.cpus is not None
+        assert inst.memory is not None
+
+    @patch('sky.clouds.slurm.Slurm.regions_with_offering')
+    def test_feasible_resources_gpu_only(self, mock_regions):
+        """When user requests only GPUs, feasible resources should have
+        a GPU-only instance type with cpus=None, memory=None."""
+        mock_region = mock.MagicMock()
+        mock_region.name = 'test-cluster'
+        mock_regions.return_value = [mock_region]
+
+        resources = resources_lib.Resources(
+            cloud=slurm_cloud.Slurm(),
+            accelerators={'GPU': 1},
+        )
+        cloud = slurm_cloud.Slurm()
+        feasible = cloud._get_feasible_launchable_resources(resources)
+
+        assert len(feasible.resources_list) == 1
+        resource = feasible.resources_list[0]
+        inst = slurm_utils.SlurmInstanceType.from_instance_type(
+            resource.instance_type)
+        assert inst.cpus is None
+        assert inst.memory is None
+        assert inst.accelerator_count == 1
+
+    @patch('sky.clouds.slurm.Slurm.regions_with_offering')
+    def test_feasible_resources_gpu_with_explicit_cpu(self, mock_regions):
+        """When user specifies CPU with GPU, instance type includes CPU/mem."""
+        mock_region = mock.MagicMock()
+        mock_region.name = 'test-cluster'
+        mock_regions.return_value = [mock_region]
+
+        resources = resources_lib.Resources(
+            cloud=slurm_cloud.Slurm(),
+            accelerators={'GPU': 1},
+            cpus='16',
+        )
+        cloud = slurm_cloud.Slurm()
+        feasible = cloud._get_feasible_launchable_resources(resources)
+
+        resource = feasible.resources_list[0]
+        inst = slurm_utils.SlurmInstanceType.from_instance_type(
+            resource.instance_type)
+        assert inst.cpus == 16.0
+        assert inst.memory is not None
+        assert inst.accelerator_count == 1
 
 
 class TestGRESGPUParsing:
@@ -1376,9 +1484,9 @@ class TestDeployVarsCpuMemPassthrough:
     def test_gpu_no_explicit_cpu_mem_passes_none(self):
         """When user requests GPUs without specifying CPU/memory,
         deploy vars should have cpus=None and memory=None."""
-        # Instance type has defaults baked in, but user didn't specify
+        # GPU-only instance type: no CPU/memory in the name
         deploy_vars = self._get_deploy_vars(
-            instance_type='2CPU--2GB--GPU:1',
+            instance_type='GPU:1',
             user_cpus=None,
             user_memory=None,
         )

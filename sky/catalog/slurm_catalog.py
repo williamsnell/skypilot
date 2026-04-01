@@ -258,8 +258,8 @@ def get_hourly_cost(instance_type: str,
     instance = slurm_utils.SlurmInstanceType.from_instance_type(instance_type)
     return common.get_hourly_cost_from_pricing(
         _get_pricing(region, zone),
-        cpus=instance.cpus,
-        memory=instance.memory,
+        cpus=instance.cpus or 0,
+        memory=instance.memory or 0,
         accelerator_name=instance.accelerator_type,
         accelerator_count=instance.accelerator_count,
     )
