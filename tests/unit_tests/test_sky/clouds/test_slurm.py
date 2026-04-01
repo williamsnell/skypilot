@@ -104,30 +104,33 @@ class TestTerminateInstances:
     """Test slurm_instance.terminate_instances()."""
 
     @pytest.mark.parametrize(
-        'job_state,should_cancel,should_signal',
+        'job_state,should_cancel',
         [
             # Terminal states - no action needed
-            ('COMPLETED', False, False),
-            ('CANCELLED', False, False),
-            ('FAILED', False, False),
-            ('TIMEOUT', False, False),
-            ('NODE_FAIL', False, False),
-            ('PREEMPTED', False, False),
-            ('SPECIAL_EXIT', False, False),
+            ('COMPLETED', False),
+            ('CANCELLED', False),
+            ('FAILED', False),
+            ('TIMEOUT', False),
+            ('NODE_FAIL', False),
+            ('PREEMPTED', False),
+            ('SPECIAL_EXIT', False),
             # COMPLETING - already terminating
-            ('COMPLETING', False, False),
-            # PENDING and CONFIGURING - cancel without signal
-            ('PENDING', True, False),
-            ('CONFIGURING', True, False),
-            # Other states - cancel with TERM signal
-            ('RUNNING', True, True),
-            ('SUSPENDED', True, True),
-            ('STAGING_OUT', True, True),
+            ('COMPLETING', False),
+            # All other states - plain scancel (actually cancels the job)
+            ('PENDING', True),
+            ('CONFIGURING', True),
+            ('RUNNING', True),
+            ('SUSPENDED', True),
+            ('STAGING_OUT', True),
         ])
     def test_terminate_instances_handles_job_states(self, tmp_path, job_state,
-                                                    should_cancel,
-                                                    should_signal):
-        """Test terminate_instances handles different job states correctly."""
+                                                    should_cancel):
+        """Test terminate_instances handles different job states correctly.
+
+        All cancellable states use plain scancel (no --signal flag).
+        scancel --signal TERM only delivers the signal without actually
+        cancelling the job, so the job stays RUNNING if processes survive.
+        """
         from sky.adaptors.slurm import JobInfo
         from sky.adaptors.slurm import SlurmClient
         from sky.adaptors.slurm import SlurmJobInfo
@@ -162,17 +165,8 @@ class TestTerminateInstances:
             )
 
         if should_cancel:
-            if should_signal:
-                mock_client.cancel_jobs_by_name.assert_called_once_with(
-                    cluster_name,
-                    signal='TERM',
-                    full=True,
-                )
-            else:
-                mock_client.cancel_jobs_by_name.assert_called_once_with(
-                    cluster_name,
-                    signal=None,
-                )
+            mock_client.cancel_jobs_by_name.assert_called_once_with(
+                cluster_name)
         else:
             mock_client.cancel_jobs_by_name.assert_not_called()
 

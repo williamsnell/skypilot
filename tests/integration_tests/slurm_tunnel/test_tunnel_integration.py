@@ -210,7 +210,14 @@ class TestTerminateInstances:
     """Test that terminate_instances cancels Slurm jobs via scancel."""
 
     def test_running_job_is_cancelled(self, slurm_cluster):
-        """Submit a sleep job, call terminate_instances, verify it's gone."""
+        """Submit a sleep job, call terminate_instances, verify it leaves
+        squeue entirely (not just receives a signal).
+
+        Regression test: scancel --signal TERM only delivers SIGTERM without
+        actually cancelling the Slurm job. The job stays in RUNNING state
+        indefinitely if processes survive the signal. A plain scancel (no
+        --signal) is needed to tell Slurm to cancel the job.
+        """
         cluster_name = f'terminate-test-{int(time.time())}'
         ssh_cmd = [
             'ssh',
@@ -225,21 +232,24 @@ class TestTerminateInstances:
             f'{slurm_cluster["user"]}@{slurm_cluster["host"]}',
         ]
 
-        # Submit a sleep job with a known name.
-        # Quote the entire sbatch command to avoid SSH arg splitting.
-        result = subprocess.run(
-            ssh_cmd +
-            ['sbatch', '--job-name', cluster_name, '--wrap', '"sleep 300"'],
-            capture_output=True,
-            text=True,
-            timeout=10)
+        # Submit a job that ignores SIGTERM and loops. This is the
+        # realistic case: the sbatch script has long-lived children
+        # (Dropbear, poll worker) that survive SIGTERM.
+        # The while-loop restarts sleep after each SIGTERM kills it.
+        wrap_script = "trap '' TERM; while true; do sleep 10; done"
+        sbatch_cmd = (f'sbatch --job-name {cluster_name} '
+                      f'--wrap "{wrap_script}"')
+        result = subprocess.run(ssh_cmd + [sbatch_cmd],
+                                capture_output=True,
+                                text=True,
+                                timeout=10)
         assert result.returncode == 0, f'sbatch failed: {result.stderr}'
         assert 'Submitted batch job' in result.stdout
 
-        # Verify job is running/pending.
-        result = subprocess.run(ssh_cmd + [
-            'squeue', '--name', cluster_name, '--noheader', '--format=%i %j %T'
-        ],
+        # Verify job is running/pending in squeue.
+        squeue_cmd = (f'squeue --name {cluster_name} '
+                      f'--noheader --format="%i %j %T"')
+        result = subprocess.run(ssh_cmd + [squeue_cmd],
                                 capture_output=True,
                                 text=True,
                                 timeout=10)
@@ -258,18 +268,25 @@ class TestTerminateInstances:
         }
         terminate_instances(cluster_name, provider_config=provider_config)
 
-        # Verify job is cancelled.
-        time.sleep(1)
-        result = subprocess.run(ssh_cmd + [
-            'sacct', '--name', cluster_name, '--noheader', '--format=State',
-            '--parsable2'
-        ],
-                                capture_output=True,
-                                text=True,
-                                timeout=10)
-        states = [s.strip() for s in result.stdout.strip().split('\n') if s]
-        assert any('CANCEL' in s for s in states), (
-            f'Job was not cancelled. States: {states}')
+        # Poll squeue until the job disappears. A plain scancel causes
+        # Slurm to cancel the job (SIGTERM -> KillWait -> SIGKILL), so it
+        # should leave squeue within a few seconds. With the buggy
+        # --signal TERM, the job stays RUNNING indefinitely.
+        deadline = time.time() + 15
+        last_squeue = ''
+        while time.time() < deadline:
+            time.sleep(1)
+            result = subprocess.run(ssh_cmd + [squeue_cmd],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10)
+            last_squeue = result.stdout.strip()
+            if not last_squeue:
+                break
+        assert not last_squeue, (
+            f'Job still in squeue 15s after terminate_instances. '
+            f'scancel must actually cancel the job, not just send a signal. '
+            f'squeue output: {last_squeue}')
 
     def test_already_terminated_job_is_noop(self, slurm_cluster):
         """terminate_instances on a nonexistent job should not raise."""

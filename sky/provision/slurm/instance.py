@@ -1325,19 +1325,18 @@ def terminate_instances(
             f'state {job_state}. No action needed.')
         return
 
-    if job_state in ('PENDING', 'CONFIGURING'):
-        # For pending/configuring jobs, cancel without signal to avoid hangs.
-        client.cancel_jobs_by_name(cluster_name_on_cloud, signal=None)
-    elif job_state == 'COMPLETING':
+    if job_state == 'COMPLETING':
         # Job is already being terminated. No action needed.
         logger.debug(
             f'Job for cluster {cluster_name_on_cloud} is already completing. '
             'No action needed.')
     else:
-        # For other states (e.g., RUNNING, SUSPENDED), send a TERM signal.
-        client.cancel_jobs_by_name(cluster_name_on_cloud,
-                                   signal='TERM',
-                                   full=True)
+        # Plain scancel (no --signal) tells Slurm to actually cancel the job:
+        # it sends SIGTERM, waits the configured KillWait grace period, then
+        # SIGKILL. Note: scancel --signal TERM only delivers the signal
+        # without cancelling the job — the job stays RUNNING if processes
+        # survive SIGTERM.
+        client.cancel_jobs_by_name(cluster_name_on_cloud)
 
     # Clean up poll worker state (tokens, signing keys, pending tasks).
     try:
