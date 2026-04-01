@@ -940,7 +940,9 @@ class SlurmCodeGen(TaskCodeGen):
                     if {self._is_podman_hpc}:
                         # podman-hpc: already inside the container via
                         # Dropbear SSH, srun not available. Run directly.
-                        srun_cmd = f'/bin/bash -c {{bash_cmd}}'
+                        # Source .profile to pick up SKY_RUNTIME_DIR so
+                        # the executor uses skypilot-runtime's Python.
+                        srun_cmd = f'. ~/.profile >/dev/null 2>&1; /bin/bash -c {{bash_cmd}}'
                     else:
                         srun_cmd = (
                             "unset $(env | awk -F= '/^SLURM_/ {{print $1}}') && "
