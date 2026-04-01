@@ -347,7 +347,9 @@ def setup_slurm_ssh() -> None:
             raise RuntimeError(
                 f'Failed to setup Slurm SSH credentials on the API server: '
                 f'{response.text}')
-    click.echo('Slurm SSH credentials configured on the API server.')
+    click.echo(
+        ux_utils.finishing_message(
+            'Slurm SSH credentials configured on the API server.'))
 
 
 def _parse_cert_expiry(ssh_keygen_output: str) -> Optional[float]:
