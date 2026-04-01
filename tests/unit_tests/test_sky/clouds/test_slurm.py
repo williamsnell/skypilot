@@ -1105,6 +1105,310 @@ class TestCreateVirtualInstance:
         assert_sbatch_matches_snapshot('basic', written_script)
 
 
+class TestSbatchOmitCpuMemWhenUnspecified:
+    """Test that --cpus-per-task and --mem are omitted from sbatch when
+    the user did not explicitly request CPU/memory.
+
+    On clusters like Isambard, each GPU automatically allocates a full
+    superchip (72 cores + 115GB RAM). Passing explicit --cpus-per-task
+    and --mem overrides this, giving a tiny allocation instead.
+
+    Expected behavior:
+    - GPUs requested, no explicit CPU/memory → omit --cpus-per-task/--mem
+    - GPUs requested, explicit CPU/memory → include --cpus-per-task/--mem
+    - No GPUs, explicit CPU/memory → include --cpus-per-task/--mem
+    """
+
+    @pytest.fixture(autouse=True)
+    def _mock_db_path(self, tmp_path):
+        """Use a temp DB for SlurmJobInfo in all tests."""
+        db_path = str(tmp_path / 'slurm_test.db')
+        with patch('sky.adaptors.slurm.SlurmJobInfo._get_db_path',
+                   return_value=db_path):
+            yield
+
+    def _setup_mocks(self, mock_ssh_runner, mock_slurm_client,
+                     mock_get_partition_info):
+        """Configure standard mocks for _create_virtual_instance tests."""
+        from sky.adaptors.slurm import SlurmPartition
+
+        mock_get_partition_info.return_value = SlurmPartition(name='gpu',
+                                                              is_default=False,
+                                                              maxtime=7 * 24 *
+                                                              60 * 60)
+
+        mock_client = mock.MagicMock()
+        mock_client.query_jobs.return_value = []
+        mock_client.get_job_nodes.return_value = (['node1'], {
+            'node1': '10.0.0.5'
+        })
+        mock_client.get_partition_qos_max_wall.return_value = None
+        mock_slurm_client.return_value = mock_client
+
+        mock_runner = mock.MagicMock()
+        mock_runner.run.return_value = (0, '', '')
+        mock_runner.get_remote_home_dir.return_value = '/home/testuser'
+        mock_ssh_runner.return_value = mock_runner
+
+    def _run_and_capture_script(self, cluster_name, config):
+        """Run _create_virtual_instance and capture the generated script."""
+        written_script = None
+
+        def capture_write(content):
+            nonlocal written_script
+            written_script = content
+
+        with patch('tempfile.NamedTemporaryFile') as mock_tempfile:
+            mock_file = mock.MagicMock()
+            mock_file.__enter__.return_value = mock_file
+            mock_file.write.side_effect = capture_write
+            mock_tempfile.return_value = mock_file
+
+            slurm_instance._create_virtual_instance(
+                region='us-west-2',
+                cluster_name=cluster_name,
+                cluster_name_on_cloud=cluster_name,
+                config=config,
+            )
+
+        assert written_script is not None, 'Script was not written'
+        return written_script
+
+    @patch('sky.provision.slurm.instance._wait_for_job_nodes')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_partition_info')
+    @patch('sky.provision.slurm.instance.slurm.SlurmClient')
+    @patch('sky.provision.slurm.instance.command_runner.SSHCommandRunner')
+    def test_gpu_without_explicit_cpu_mem_omits_sbatch_flags(
+            self, mock_ssh_runner, mock_slurm_client, mock_get_partition_info,
+            mock_get_proctrack_type, mock_wait_for_job_nodes):
+        """When GPUs are requested without explicit CPU/memory, the sbatch
+        script should NOT contain --cpus-per-task or --mem directives.
+        This lets the scheduler auto-allocate resources per GPU."""
+        from sky.provision import common
+
+        self._setup_mocks(mock_ssh_runner, mock_slurm_client,
+                          mock_get_partition_info)
+        mock_get_proctrack_type.return_value = 'cgroup'
+
+        config = common.ProvisionConfig(
+            provider_config={
+                'ssh': {
+                    'hostname': 'login.example.com',
+                    'port': '22',
+                    'user': 'testuser',
+                    'private_key': '/path/to/key',
+                },
+                'cluster': 'test-slurm',
+                'partition': 'gpu',
+                'provision_timeout': 300,
+            },
+            authentication_config={},
+            docker_config={},
+            node_config={
+                # cpus and memory are None = user didn't specify them
+                'cpus': None,
+                'memory': None,
+                'accelerator_type': 'GPU',
+                'accelerator_count': 1,
+            },
+            count=1,
+            tags={},
+            resume_stopped_nodes=False,
+            ports_to_open_on_launch=None,
+        )
+
+        script = self._run_and_capture_script('test-gpu-no-cpu-mem', config)
+        assert '--cpus-per-task' not in script, (
+            'sbatch script should not contain --cpus-per-task when user '
+            'did not specify CPUs (let scheduler auto-allocate per GPU)')
+        assert '#SBATCH --mem=' not in script, (
+            'sbatch script should not contain --mem when user '
+            'did not specify memory (let scheduler auto-allocate per GPU)')
+        # GPU directive should still be present
+        assert '--gres=gpu:1' in script
+
+    @patch('sky.provision.slurm.instance._wait_for_job_nodes')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_partition_info')
+    @patch('sky.provision.slurm.instance.slurm.SlurmClient')
+    @patch('sky.provision.slurm.instance.command_runner.SSHCommandRunner')
+    def test_gpu_with_explicit_cpu_mem_includes_sbatch_flags(
+            self, mock_ssh_runner, mock_slurm_client, mock_get_partition_info,
+            mock_get_proctrack_type, mock_wait_for_job_nodes):
+        """When GPUs are requested WITH explicit CPU/memory, the sbatch
+        script SHOULD contain --cpus-per-task and --mem directives."""
+        from sky.provision import common
+
+        self._setup_mocks(mock_ssh_runner, mock_slurm_client,
+                          mock_get_partition_info)
+        mock_get_proctrack_type.return_value = 'cgroup'
+
+        config = common.ProvisionConfig(
+            provider_config={
+                'ssh': {
+                    'hostname': 'login.example.com',
+                    'port': '22',
+                    'user': 'testuser',
+                    'private_key': '/path/to/key',
+                },
+                'cluster': 'test-slurm',
+                'partition': 'gpu',
+                'provision_timeout': 300,
+            },
+            authentication_config={},
+            docker_config={},
+            node_config={
+                'cpus': 16,
+                'memory': 64,
+                'accelerator_type': 'GPU',
+                'accelerator_count': 2,
+            },
+            count=1,
+            tags={},
+            resume_stopped_nodes=False,
+            ports_to_open_on_launch=None,
+        )
+
+        script = self._run_and_capture_script('test-gpu-with-cpu-mem', config)
+        assert '#SBATCH --cpus-per-task=16' in script, (
+            'sbatch script should contain --cpus-per-task when user '
+            'explicitly specified CPUs')
+        assert '#SBATCH --mem=64G' in script, (
+            'sbatch script should contain --mem when user '
+            'explicitly specified memory')
+        assert '--gres=gpu:2' in script
+
+    @patch('sky.provision.slurm.instance._wait_for_job_nodes')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_partition_info')
+    @patch('sky.provision.slurm.instance.slurm.SlurmClient')
+    @patch('sky.provision.slurm.instance.command_runner.SSHCommandRunner')
+    def test_no_gpu_with_explicit_cpu_mem_includes_sbatch_flags(
+            self, mock_ssh_runner, mock_slurm_client, mock_get_partition_info,
+            mock_get_proctrack_type, mock_wait_for_job_nodes):
+        """CPU-only jobs with explicit CPU/memory should include the flags."""
+        from sky.provision import common
+
+        self._setup_mocks(mock_ssh_runner, mock_slurm_client,
+                          mock_get_partition_info)
+        mock_get_proctrack_type.return_value = 'cgroup'
+
+        config = common.ProvisionConfig(
+            provider_config={
+                'ssh': {
+                    'hostname': 'login.example.com',
+                    'port': '22',
+                    'user': 'testuser',
+                    'private_key': '/path/to/key',
+                },
+                'cluster': 'test-slurm',
+                'partition': 'cpu',
+                'provision_timeout': 300,
+            },
+            authentication_config={},
+            docker_config={},
+            node_config={
+                'cpus': 8,
+                'memory': 32,
+            },
+            count=1,
+            tags={},
+            resume_stopped_nodes=False,
+            ports_to_open_on_launch=None,
+        )
+
+        script = self._run_and_capture_script('test-cpu-only', config)
+        assert '#SBATCH --cpus-per-task=8' in script
+        assert '#SBATCH --mem=32G' in script
+
+
+class TestDeployVarsCpuMemPassthrough:
+    """Test that make_deploy_resources_variables passes None for CPU/memory
+    when the user did not specify them, so the template can conditionally
+    omit --cpus-per-task and --mem from the sbatch script."""
+
+    FAKE_SSH_CONFIG = {
+        'hostname': '10.0.0.1',
+        'port': '22',
+        'user': 'slurm',
+        'identityfile': ['/home/user/.ssh/id_rsa'],
+    }
+
+    def _get_deploy_vars(self, instance_type, user_cpus, user_memory):
+        """Call make_deploy_resources_variables with controlled resources."""
+        cloud = slurm_cloud.Slurm()
+
+        mock_resources = mock.MagicMock(unsafe=True)
+        mock_resources.zone = 'gpu'
+        mock_resources.instance_type = instance_type
+        mock_resources.assert_launchable.return_value = mock_resources
+        mock_resources.extract_docker_image.return_value = None
+        mock_resources.cluster_config_overrides = {}
+        # These are None when not user-specified
+        mock_resources.cpus = user_cpus
+        mock_resources.memory = user_memory
+
+        region = mock.MagicMock()
+        region.name = 'mycluster'
+        zone_mock = mock.MagicMock()
+        zone_mock.name = 'gpu'
+
+        mock_ssh_config = mock.MagicMock()
+        mock_ssh_config.lookup.return_value = self.FAKE_SSH_CONFIG
+
+        with patch('sky.clouds.slurm.slurm_utils.get_slurm_ssh_config',
+                   return_value=mock_ssh_config), \
+             patch('sky.clouds.slurm.slurm_utils.get_partitions',
+                   return_value=['gpu', 'cpu']), \
+             patch('sky.clouds.slurm.slurm_utils.resolve_gres_gpu_type',
+                   side_effect=lambda cluster, t, count=1, partition=None: t), \
+             patch('sky.clouds.slurm.slurm_utils.resolve_container_runtime',
+                   return_value=None):
+            return cloud.make_deploy_resources_variables(
+                resources=mock_resources,
+                cluster_name=mock.MagicMock(),
+                region=region,
+                zones=[zone_mock],
+                num_nodes=1,
+            )
+
+    def test_gpu_no_explicit_cpu_mem_passes_none(self):
+        """When user requests GPUs without specifying CPU/memory,
+        deploy vars should have cpus=None and memory=None."""
+        # Instance type has defaults baked in, but user didn't specify
+        deploy_vars = self._get_deploy_vars(
+            instance_type='2CPU--2GB--GPU:1',
+            user_cpus=None,
+            user_memory=None,
+        )
+        assert deploy_vars['cpus'] is None, (
+            'cpus should be None when user did not specify')
+        assert deploy_vars['memory'] is None, (
+            'memory should be None when user did not specify')
+
+    def test_gpu_with_explicit_cpu_mem_passes_values(self):
+        """When user explicitly requests CPU/memory, deploy vars should
+        have those values."""
+        deploy_vars = self._get_deploy_vars(
+            instance_type='16CPU--64GB--GPU:2',
+            user_cpus='16',
+            user_memory='64',
+        )
+        assert deploy_vars['cpus'] == '16.0'
+        assert deploy_vars['memory'] == '64.0'
+
+    def test_cpu_only_explicit_passes_values(self):
+        """CPU-only instance with explicit resources should pass values."""
+        deploy_vars = self._get_deploy_vars(
+            instance_type='8CPU--32GB',
+            user_cpus='8',
+            user_memory='32',
+        )
+        assert deploy_vars['cpus'] == '8.0'
+        assert deploy_vars['memory'] == '32.0'
+
+
 class TestGetPendingJobCount:
     """Test SlurmClient.get_pending_job_count()."""
 

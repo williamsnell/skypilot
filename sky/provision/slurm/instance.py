@@ -912,8 +912,8 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
 #SBATCH --wait-all-nodes=1
 # Let the job be terminated rather than requeued implicitly.
 #SBATCH --no-requeue
-#SBATCH --cpus-per-task={int(resources["cpus"])}
-#SBATCH --mem={int(resources["memory"])}G
+{f'#SBATCH --cpus-per-task={int(resources["cpus"])}' + chr(10) if resources.get("cpus") is not None else ''}\
+{f'#SBATCH --mem={int(resources["memory"])}G' + chr(10) if resources.get("memory") is not None else ''}\
 {gpu_directive}{custom_sbatch_directives}
 
 # Cleanup function to remove cluster dirs on job termination.

@@ -44,9 +44,17 @@ trap cleanup EXIT
 trap 'exit 0' TERM
 
 # Create sky home directory and subdirectories for the cluster.
-mkdir -p /home/testuser/.sky_clusters/test-cluster/sky_logs /home/testuser/.sky_clusters/test-cluster/sky_workdir /home/testuser/.sky_clusters/test-cluster/.sky
-# Create sky runtime directory on each node.
-srun --nodes=1 mkdir -p /tmp/test-cluster
+mkdir -p /home/testuser/.sky_clusters/test-cluster/sky_logs /home/testuser/.sky_clusters/test-cluster/sky_workdir /home/testuser/.sky_clusters/test-cluster/sky_templates /home/testuser/.sky_clusters/test-cluster/.sky
+# Clean any leftover runtime dir from a previous job on the same node
+# (e.g. a zombie job whose cleanup trap never ran), then recreate it.
+# This prevents stale miniconda/venv dirs from breaking setup.
+srun --nodes=1 rm -rf /tmp/test-cluster
+# Create sky runtime directory on each node, including .sky/sky_app
+# which is needed under the runtime dir for podman-hpc (where the
+# runtime dir is mounted as /root inside the container).
+srun --nodes=1 mkdir -p /tmp/test-cluster/.sky/sky_app
+# Set up authorized_keys for SSH proxy (Dropbear) authentication.
+
 # Marker file to indicate we're in a Slurm cluster.
 touch /home/testuser/.sky_clusters/test-cluster/.sky_slurm_cluster
 # Store proctrack type for task executor to read.
@@ -58,7 +66,7 @@ CONTAINER_START=$SECONDS
 echo "[container] Initializing test-cluster on all nodes"
 rm -rf /home/testuser/.sky_clusters/test-cluster/.sky_container_init_done
 mkdir -p /home/testuser/.sky_clusters/test-cluster/.sky_container_init_done
-srun --overlap --unbuffered --nodes=1 --ntasks-per-node=1 --container-image='nvcr.io#nvidia/pytorch:24.01-py3' --container-name=test-cluster:create --container-mounts="/home/testuser:/home/testuser,/tmp/ccache_$(id -u):/var/cache/ccache" --container-remap-root --no-container-mount-home --container-writable bash -c 'set -e
+srun --overlap --unbuffered --nodes=1 --ntasks-per-node=1 --container-image='nvcr.io#nvidia/pytorch:24.01-py3' --container-name=test-cluster:create --container-mounts="/home/testuser:/home/testuser,/tmp/ccache_$(id -u):/var/cache/ccache,/tmp/test-cluster:/tmp/test-cluster" --container-remap-root --no-container-mount-home --container-writable bash -c 'set -e
 echo "[container-init] Starting..."
 INIT_START=$SECONDS
 apt-get update

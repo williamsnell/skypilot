@@ -441,12 +441,14 @@ class Slurm(clouds.Cloud):
         custom_resources = resources_utils.make_ray_custom_resources_str(
             acc_dict)
 
-        # resources.memory and cpus are none if they are not explicitly set.
-        # we fetch the default values for the instance type in that case.
+        # resources.memory and cpus are None if they are not explicitly set.
+        # When the user didn't specify CPU/memory, pass None so the sbatch
+        # script omits --cpus-per-task/--mem, letting the Slurm scheduler
+        # auto-allocate (e.g. per-GPU superchip allocation on Isambard).
         s = slurm_utils.SlurmInstanceType.from_instance_type(
             resources.instance_type)
-        cpus = s.cpus
-        mem = s.memory
+        cpus = s.cpus if resources.cpus is not None else None
+        mem = s.memory if resources.memory is not None else None
         # Optionally populate accelerator information.
         acc_count = s.accelerator_count if s.accelerator_count else 0
         acc_type = s.accelerator_type if s.accelerator_type else None
@@ -516,8 +518,8 @@ class Slurm(clouds.Cloud):
         deploy_vars = {
             'instance_type': resources.instance_type,
             'custom_resources': custom_resources,
-            'cpus': str(cpus),
-            'memory': str(mem),
+            'cpus': str(cpus) if cpus is not None else None,
+            'memory': str(mem) if mem is not None else None,
             'accelerator_count': str(acc_count),
             'accelerator_type': acc_type,
             'slurm_cluster': cluster,

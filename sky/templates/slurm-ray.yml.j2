@@ -57,8 +57,12 @@ available_node_types:
       # From clouds/slurm.py::Slurm.make_deploy_resources_variables.
       instance_type: {{instance_type}}
       disk_size: {{disk_size}}
+{% if cpus is not none %}
       cpus: {{cpus}}
+{% endif %}
+{% if memory is not none %}
       memory: {{memory}}
+{% endif %}
       accelerator_type: {{accelerator_type}}
       accelerator_count: {{accelerator_count}}
 {% if image_id is not none %}
