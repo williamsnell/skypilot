@@ -687,15 +687,16 @@ def _create_virtual_instance(
             f'{skypilot_runtime_dir}:{skypilot_runtime_dir}',
         ]
         if container_runtime == 'podman-hpc':
-            # Mount sky_cluster_home_dir as /root so HOME=/root inside
-            # the container points to the same directory that the
-            # command runner uses (HOME=sky_cluster_home_dir). This
-            # ensures user setup scripts (e.g. git clone ~/repo) put
-            # files where interactive SSH sessions can find them.
-            # sky_logs, sky_workdir, sky_templates are subdirs of
-            # sky_cluster_home_dir, so they're automatically under /root.
+            # Mount the runtime dir as /root so HOME=/root works
+            # with no SKY_RUNTIME_DIR — same as RunPod/Vast where
+            # everything lives under $HOME inside the container.
+            # Also mount shared-storage dirs (sky_logs, sky_workdir)
+            # under /root so they're accessible via ~/sky_logs etc.
             mount_paths += [
-                f'{sky_cluster_home_dir}:/root',
+                f'{skypilot_runtime_dir}:/root',
+                f'{sky_cluster_home_dir}/sky_logs:/root/sky_logs',
+                f'{sky_cluster_home_dir}/sky_workdir:/root/sky_workdir',
+                f'{sky_cluster_home_dir}/sky_templates:/root/sky_templates',
             ]
         # When workdir differs from remote_home_dir (e.g. workdir is on
         # NFS at /home/ubuntu while $HOME is /home_local/ubuntu), mount
