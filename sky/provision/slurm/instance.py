@@ -828,6 +828,9 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'echo "export UV_CACHE_DIR='
                 f'{remote_home_dir}/.cache/uv" '
                 f'>> {skypilot_runtime_dir}/.profile\n'
+                f'echo "export SKYPILOT_NFS_HOME='
+                f'{remote_home_dir}" '
+                f'>> {skypilot_runtime_dir}/.profile\n'
                 f'touch {ready_signal}')
         else:
             # Pyxis/Enroot: create a persistent named container, then
