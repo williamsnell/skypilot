@@ -4784,6 +4784,46 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
             The exit code of the tail command. Returns code 100 if the job has
             failed. See exceptions.JobExitCode for possible return codes.
         """
+        # For Slurm podman-hpc: tail logs directly from NFS via the
+        # login node SSH runner, bypassing the poll queue. Log files
+        # are at sky_cluster_home_dir/sky_logs/ on NFS, readable from
+        # the login node without entering the container.
+        if handle.is_slurm_podman_hpc():
+            runners = handle.get_command_runners()
+            head_runner = runners[0]
+            # Construct tail command using the log path pattern.
+            # Log dir is ~/sky_logs/{job_id}-{name}/ but we don't know
+            # the name, so use a glob. Resolve job_id=None to latest.
+            log_dir = constants.SKY_LOGS_DIRECTORY
+            if job_id is None:
+                # Find the latest log dir by modification time.
+                find_latest = (f'ls -td {log_dir}/*/ 2>/dev/null '
+                               f'| head -1')
+                log_glob = f'$({find_latest})/run.log'
+            else:
+                log_glob = f'{log_dir}/{job_id}-*/run.log'
+            # Build tail command.
+            tail_parts = ['tail']
+            if tail > 0:
+                tail_parts.extend(['-n', str(tail)])
+            if follow:
+                tail_parts.append('-f')
+            tail_cmd = f'{" ".join(tail_parts)} {log_glob} 2>/dev/null'
+            if threading.current_thread() is threading.main_thread():
+                signal.signal(signal.SIGINT, backend_utils.interrupt_handler)
+                signal.signal(signal.SIGTSTP, backend_utils.stop_handler)
+            try:
+                final = head_runner.run_driver(
+                    tail_cmd,
+                    stream_logs=stream_logs,
+                    process_stream=process_stream,
+                    require_outputs=require_outputs,
+                    ssh_mode=command_runner.SshMode.INTERACTIVE,
+                )
+            except SystemExit as e:
+                final = e.code
+            return final
+
         if handle.is_grpc_enabled_with_flag:
             last_exit_code = 0
             try:
