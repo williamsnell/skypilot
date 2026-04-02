@@ -2002,20 +2002,23 @@ exec {ssh_command} srun --unbuffered --quiet --overlap \\
         # Set HOME to sky_dir and TMPDIR to /tmp for all paths.
         venv_activate = (f'{self.skypilot_runtime_dir}/'
                          f'skypilot-runtime/bin/activate')
+        # For podman-hpc in-container: HOME=/root (ephemeral, matches
+        # interactive SSH). For host-side and pyxis: HOME=sky_dir (NFS).
+        is_podman_hpc = (self.container_args is not None and
+                         self.container_args.startswith('podman-hpc'))
+        home_dir = '/root' if (in_container and
+                               is_podman_hpc) else (self.sky_dir)
         home_and_env = (f'export {constants.SKY_RUNTIME_DIR_ENV_VAR_KEY}='
                         f'"{self.skypilot_runtime_dir}" && '
                         f'export TMPDIR=/tmp && '
                         f'{self._ENV_SETUP} && '
-                        f'cd {self.sky_dir} && export HOME="$PWD" && '
+                        f'cd {home_dir} && export HOME="$PWD" && '
                         f'{{ [ -f {venv_activate} ] && '
                         f'source {venv_activate}; true; }}')
         if in_container:
             assert self.container_args is not None, (
                 '_run_via_srun with in_container=True called but '
                 'container_args not set')
-            # Use full home/env setup: both pyxis and podman-hpc mount
-            # sky_dir and skypilot_runtime_dir into the container, so
-            # the same HOME, venv, and paths work in both contexts.
             inner_cmd = f'{home_and_env} && {cmd}'
             extra_srun_args = f'{self.container_args} '
         else:

@@ -284,11 +284,14 @@ def _sbatch_keep_alive_block(
     # to signal us, then launch the Skylet from the batch step's cgroup.
     container_name = slurm_utils.podman_hpc_container_name(
         cluster_name_on_cloud)
-    signal_file = (f'{sky_cluster_home_dir}/'
+    # Signal file in runtime dir (node-local /tmp) — visible from both
+    # the host (sbatch watches it) and the container (touch writes it
+    # via $HOME which is /root = skypilot_runtime_dir).
+    signal_file = (f'{skypilot_runtime_dir}/'
                    f'{skylet_constants.SLURM_SKYLET_START_SIGNAL}')
     skylet_cmd = (
         f'source {skypilot_runtime_dir}/skypilot-runtime/bin/activate && '
-        f'export HOME={sky_cluster_home_dir} && '
+        f'export HOME=/root && '
         f'export SKY_RUNTIME_DIR={skypilot_runtime_dir} && '
         f'python -m sky.skylet.attempt_skylet')
     # Set up authorized_keys and start persistent Dropbear inside the
@@ -311,7 +314,7 @@ def _sbatch_keep_alive_block(
         poll_log = f'{sky_cluster_home_dir}/.sky/poll_worker.log'
         poll_worker_cmd = (
             f'source {skypilot_runtime_dir}/skypilot-runtime/bin/activate && '
-            f'export HOME={sky_cluster_home_dir} && '
+            f'export HOME=/root && '
             f'export SKYPILOT_POLL_TOKEN={shlex.quote(poll_token)} && '
             f'echo "[poll-worker] Starting at $(date)" >> {poll_log} && '
             f'echo "[poll-worker] API server: {api_server_url}" '
@@ -687,16 +690,14 @@ def _create_virtual_instance(
             f'{skypilot_runtime_dir}:{skypilot_runtime_dir}',
         ]
         if container_runtime == 'podman-hpc':
-            # Mount the runtime dir as /root so HOME=/root works
-            # with no SKY_RUNTIME_DIR — same as RunPod/Vast where
-            # everything lives under $HOME inside the container.
-            # Also mount shared-storage dirs (sky_logs, sky_workdir)
-            # under /root so they're accessible via ~/sky_logs etc.
+            # Mount the runtime dir as /root so HOME=/root is ephemeral
+            # (node-local /tmp). Only sky_logs is on NFS so the API
+            # server can read logs from the login node. sky_workdir and
+            # sky_templates are rsynced/copied per-node and don't need
+            # NFS — they live ephemerally under /root.
             mount_paths += [
                 f'{skypilot_runtime_dir}:/root',
                 f'{sky_cluster_home_dir}/sky_logs:/root/sky_logs',
-                f'{sky_cluster_home_dir}/sky_workdir:/root/sky_workdir',
-                f'{sky_cluster_home_dir}/sky_templates:/root/sky_templates',
             ]
         # When workdir differs from remote_home_dir (e.g. workdir is on
         # NFS at /home/ubuntu while $HOME is /home_local/ubuntu), mount
@@ -816,6 +817,17 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'$((SECONDS - CONTAINER_START))s"\n'
                 f'echo {shlex.quote(container_image)} > '
                 f'{container_marker_file}\n'
+                # Append SKY_RUNTIME_DIR and UV_CACHE_DIR to .profile.
+                # Container init already wrote PATH/LD_LIBRARY_PATH inside
+                # the container. We write from the host side because
+                # remote_home_dir is a Python variable not available inside
+                # the container init script.
+                # /root inside the container = skypilot_runtime_dir on host.
+                f'echo "export SKY_RUNTIME_DIR={skypilot_runtime_dir}" '
+                f'>> {skypilot_runtime_dir}/.profile\n'
+                f'echo "export UV_CACHE_DIR='
+                f'{remote_home_dir}/.cache/uv" '
+                f'>> {skypilot_runtime_dir}/.profile\n'
                 f'touch {ready_signal}')
         else:
             # Pyxis/Enroot: create a persistent named container, then
