@@ -815,13 +815,6 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'$((SECONDS - CONTAINER_START))s"\n'
                 f'echo {shlex.quote(container_image)} > '
                 f'{container_marker_file}\n'
-                # Set SKY_RUNTIME_DIR in .profile so Dropbear sessions
-                # (including the executor) find python_path, the venv,
-                # and skylet state in the node-local runtime dir.
-                # /root inside the container = sky_cluster_home_dir on
-                # the host, so we can write .profile from the host side.
-                f'echo "export SKY_RUNTIME_DIR={skypilot_runtime_dir}" '
-                f'>> {sky_cluster_home_dir}/.profile\n'
                 f'touch {ready_signal}')
         else:
             # Pyxis/Enroot: create a persistent named container, then
