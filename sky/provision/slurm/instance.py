@@ -791,6 +791,7 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'--nodes={num_nodes} --ntasks-per-node=1 '
                 f'podman-hpc run --gpu '
                 f'--env SLURM_PROCID=$SLURM_PROCID '
+                f'--env SKYPILOT_NFS_HOME={remote_home_dir} '
                 f'--name {shlex.quote(podman_container_name)} '
                 f'--replace '
                 f'{podman_mount_args} '
@@ -1397,7 +1398,8 @@ def _build_pyxis_args(cluster_name_on_cloud: str) -> str:
     return f'--container-remap-root --container-name={quoted_name}:exec'
 
 
-def _build_podman_hpc_args(cluster_name_on_cloud: str) -> str:
+def _build_podman_hpc_args(cluster_name_on_cloud: str,
+                           remote_home_dir: str) -> str:
     """Build podman-hpc exec args for srun.
 
     Uses 'podman-hpc exec' to run commands inside the persistent
@@ -1408,6 +1410,7 @@ def _build_podman_hpc_args(cluster_name_on_cloud: str) -> str:
         cluster_name_on_cloud)
     return (f'podman-hpc exec -i '
             f'--env TMPDIR=/tmp '
+            f'--env SKYPILOT_NFS_HOME={remote_home_dir} '
             f'{shlex.quote(container_name)}')
 
 
@@ -1503,7 +1506,8 @@ def get_command_runners(
     container_args = None
     if has_container:
         if container_runtime == 'podman-hpc':
-            container_args = _build_podman_hpc_args(cluster_name_on_cloud)
+            container_args = _build_podman_hpc_args(cluster_name_on_cloud,
+                                                    remote_home_dir)
         else:
             container_args = _build_pyxis_args(cluster_name_on_cloud)
 
