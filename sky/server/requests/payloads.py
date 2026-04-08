@@ -154,6 +154,15 @@ class BasePayload(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra='ignore')
 
 
+class SlurmHostCredentials(pydantic.BaseModel):
+    """Per-host SSH credentials for a Slurm cluster."""
+    hostname: str
+    ssh_user: str
+    certificate_content: Optional[str] = None
+    proxy_jump: Optional[str] = None
+    container_runtime: Optional[str] = None
+
+
 class SetupSlurmSshBody(BasePayload):
     """Payload for the sky setup-slurm-ssh endpoint.
 
@@ -163,10 +172,13 @@ class SetupSlurmSshBody(BasePayload):
     """
     env_vars: Dict[str, str] = {}
     private_key_content: str
-    certificate_content: Optional[str] = None
-    ssh_user: str
-    proxy_jump: Optional[str] = None
+    # Per-host credentials (new multi-host path).
+    hosts: List[SlurmHostCredentials] = []
     cert_expires_at: Optional[float] = None
+    # Legacy single-host fields (backward compat with old clients).
+    certificate_content: Optional[str] = None
+    ssh_user: Optional[str] = None
+    proxy_jump: Optional[str] = None
 
     def __init__(self, **data):
         data['env_vars'] = data.get('env_vars', request_body_env_vars())

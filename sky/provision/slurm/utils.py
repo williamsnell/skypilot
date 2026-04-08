@@ -99,17 +99,18 @@ SLURM_USERS_DIR = '~/.sky/slurm/users'
 def persist_slurm_ssh_credentials(
     user_hash: str,
     private_key_content: str,
-    ssh_user: str,
+    hosts: Optional[List[Dict[str, Any]]] = None,
+    cert_expires_at: Optional[float] = None,
+    # Legacy single-host fields (backward compat).
+    ssh_user: Optional[str] = None,
     certificate_content: Optional[str] = None,
     proxy_jump: Optional[str] = None,
-    cert_expires_at: Optional[float] = None,
 ) -> str:
     """Persist SSH credentials for a Slurm user on the API server.
 
-    Writes the private key (and optional certificate) to a per-user
-    directory, then generates an SSH config overlay so that
-    get_slurm_ssh_config() automatically picks up User, IdentityFile,
-    CertificateFile, and ProxyJump for this user.
+    Writes the private key (and per-host certificates) to a per-user
+    directory, then generates a self-contained SSH config so that
+    get_slurm_ssh_config() returns the full config for this user.
 
     Returns the path to the per-user directory.
     """
@@ -125,14 +126,6 @@ def persist_slurm_ssh_credentials(
         f.write(private_key_content)
     os.chmod(key_path, 0o600)
 
-    # Write certificate if provided
-    cert_path = None
-    if certificate_content:
-        cert_path = os.path.join(user_dir, 'skypilot_slurm-cert.pub')
-        with open(cert_path, 'w', encoding='utf-8') as f:
-            f.write(certificate_content)
-        os.chmod(cert_path, 0o644)
-
     # Write certificate expiry timestamp
     expires_path = os.path.join(user_dir, 'cert_expires_at')
     if cert_expires_at is not None:
@@ -141,21 +134,45 @@ def persist_slurm_ssh_credentials(
     elif os.path.exists(expires_path):
         os.remove(expires_path)
 
-    # Generate SSH config overlay
-    # Uses Host * so it applies to all hosts; the base config provides
-    # HostName, Port, ContainerRuntime per-host. This overlay adds
-    # the per-user fields that win via SSH first-match semantics.
-    config_lines = [
-        'Host *',
-        f'    User {ssh_user}',
-        f'    IdentityFile {key_path}',
-        '    IdentitiesOnly yes',
-    ]
-    if cert_path:
-        config_lines.append(f'    CertificateFile {cert_path}')
-    if proxy_jump:
-        config_lines.append(f'    ProxyJump {proxy_jump}')
-    config_lines.append('')  # trailing newline
+    # Normalize to per-host list. If the new `hosts` field is provided,
+    # use it; otherwise fall back to the legacy single-host fields.
+    if not hosts and ssh_user is not None:
+        hosts = [{
+            'hostname': '*',
+            'ssh_user': ssh_user,
+            'certificate_content': certificate_content,
+            'proxy_jump': proxy_jump,
+        }]
+
+    # Generate self-contained SSH config with per-host blocks.
+    config_lines: List[str] = []
+    for host_cfg in (hosts or []):
+        hostname = host_cfg['hostname']
+        host_user = host_cfg['ssh_user']
+        host_cert_content = host_cfg.get('certificate_content')
+        host_proxy = host_cfg.get('proxy_jump')
+        host_runtime = host_cfg.get('container_runtime')
+
+        # Write per-host certificate if provided.
+        cert_path = None
+        if host_cert_content:
+            cert_filename = f'{hostname}-cert.pub'
+            cert_path = os.path.join(user_dir, cert_filename)
+            with open(cert_path, 'w', encoding='utf-8') as f:
+                f.write(host_cert_content)
+            os.chmod(cert_path, 0o644)
+
+        config_lines.append(f'Host {hostname}')
+        config_lines.append(f'    User {host_user}')
+        config_lines.append(f'    IdentityFile {key_path}')
+        config_lines.append('    IdentitiesOnly yes')
+        if cert_path:
+            config_lines.append(f'    CertificateFile {cert_path}')
+        if host_proxy:
+            config_lines.append(f'    ProxyJump {host_proxy}')
+        if host_runtime:
+            config_lines.append(f'    ContainerRuntime {host_runtime}')
+        config_lines.append('')  # blank line between blocks
 
     config_path = os.path.join(user_dir, 'config')
     with open(config_path, 'w', encoding='utf-8') as f:
@@ -167,34 +184,32 @@ def persist_slurm_ssh_credentials(
 
 
 def get_slurm_ssh_config(user_hash: Optional[str] = None,) -> SSHConfig:
-    """Get the Slurm SSH config, optionally merged with a per-user overlay.
+    """Get the Slurm SSH config for this user.
 
-    If user_hash is provided and a per-user overlay exists at
-    ~/.sky/slurm/users/{user_hash}/config, it is parsed first so its
-    values (User, IdentityFile, ProxyJump, etc.) take precedence via
-    SSH first-match semantics.
+    If a per-user config exists at ~/.sky/slurm/users/{user_hash}/config,
+    it is used exclusively (it is self-contained with all host definitions
+    and credentials).
 
-    If user_hash is None, falls back to the USER_ID_ENV_VAR environment
-    variable (set by the API server on every request).
+    Otherwise, falls back to the shared base config at ~/.sky/slurm/config.
     """
     if user_hash is None:
         user_hash = os.environ.get(constants.USER_ID_ENV_VAR, '')
 
-    slurm_config = SSHConfig()
-
-    # Parse per-user overlay first (if it exists) so its values win.
+    # Try per-user config first (self-contained, written by setup_slurm_ssh).
     if user_hash:
-        overlay_path = os.path.expanduser(
+        user_config_path = os.path.expanduser(
             os.path.join(SLURM_USERS_DIR, user_hash, 'config'))
-        if os.path.isfile(overlay_path):
-            with open(overlay_path, 'r', encoding='utf-8') as f:
+        if os.path.isfile(user_config_path):
+            slurm_config = SSHConfig()
+            with open(user_config_path, 'r', encoding='utf-8') as f:
                 slurm_config.parse(f)
+            return slurm_config
 
-    # Parse base config.
+    # Fall back to shared base config.
     base_path = os.path.expanduser(DEFAULT_SLURM_PATH)
+    slurm_config = SSHConfig()
     with open(base_path, 'r', encoding='utf-8') as f:
         slurm_config.parse(f)
-
     return slurm_config
 
 

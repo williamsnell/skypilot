@@ -59,10 +59,13 @@ class TestPersistSlurmSshCredentials:
         user_dir = slurm_utils.persist_slurm_ssh_credentials(
             user_hash='abc123',
             private_key_content='KEY',
-            ssh_user='testuser',
-            certificate_content='CERT_DATA',
+            hosts=[{
+                'hostname': 'mycluster',
+                'ssh_user': 'testuser',
+                'certificate_content': 'CERT_DATA',
+            }],
         )
-        cert_path = os.path.join(user_dir, 'skypilot_slurm-cert.pub')
+        cert_path = os.path.join(user_dir, 'mycluster-cert.pub')
         assert os.path.isfile(cert_path)
         assert open(cert_path).read() == 'CERT_DATA'
 
@@ -154,11 +157,11 @@ class TestPersistSlurmSshCredentials:
         assert not os.path.isfile(expires_path)
 
 
-class TestGetSlurmSshConfigOverlay:
-    """Tests for get_slurm_ssh_config() with per-user overlay merging."""
+class TestGetSlurmSshConfig:
+    """Tests for get_slurm_ssh_config() with per-user config."""
 
-    def test_base_config_only(self, slurm_dir):
-        """Without overlay, returns base config values."""
+    def test_base_config_fallback(self, slurm_dir):
+        """Without per-user config, falls back to base config."""
         config = slurm_utils.get_slurm_ssh_config(user_hash='nonexistent')
         result = config.lookup('mycluster')
         assert result['hostname'] == 'login.example.com'
@@ -166,25 +169,32 @@ class TestGetSlurmSshConfigOverlay:
         assert result.get('user') is None or result['user'] == os.getenv(
             'USER', '')
 
-    def test_overlay_user_wins(self, slurm_dir):
-        """Overlay User takes precedence over base config."""
+    def test_per_user_config_is_self_contained(self, slurm_dir):
+        """Per-user config is used exclusively, base config is ignored."""
         slurm_utils.persist_slurm_ssh_credentials(
             user_hash='user1',
             private_key_content='KEY',
-            ssh_user='alice',
+            hosts=[{
+                'hostname': 'mycluster',
+                'ssh_user': 'alice',
+            }],
         )
         config = slurm_utils.get_slurm_ssh_config(user_hash='user1')
         result = config.lookup('mycluster')
         assert result['user'] == 'alice'
-        # Base config values preserved
-        assert result['hostname'] == 'login.example.com'
+        # HostName from base config is NOT merged in — per-user is
+        # self-contained, so hostname resolves to the Host name itself.
+        assert result['hostname'] == 'mycluster'
 
-    def test_overlay_identity_file(self, slurm_dir):
-        """Overlay IdentityFile points to persisted key."""
+    def test_per_user_identity_file(self, slurm_dir):
+        """Per-user config IdentityFile points to persisted key."""
         user_dir = slurm_utils.persist_slurm_ssh_credentials(
             user_hash='user1',
             private_key_content='KEY',
-            ssh_user='alice',
+            hosts=[{
+                'hostname': 'mycluster',
+                'ssh_user': 'alice',
+            }],
         )
         config = slurm_utils.get_slurm_ssh_config(user_hash='user1')
         result = config.lookup('mycluster')
@@ -192,20 +202,55 @@ class TestGetSlurmSshConfigOverlay:
         expected_key = os.path.join(user_dir, 'skypilot_slurm')
         assert expected_key in identity_files
 
-    def test_overlay_proxy_jump(self, slurm_dir):
-        """Overlay ProxyJump is included when set."""
+    def test_per_user_proxy_jump(self, slurm_dir):
+        """Per-user config includes ProxyJump when set."""
         slurm_utils.persist_slurm_ssh_credentials(
             user_hash='user1',
             private_key_content='KEY',
-            ssh_user='alice',
-            proxy_jump='alice@jump.example',
+            hosts=[{
+                'hostname': 'mycluster',
+                'ssh_user': 'alice',
+                'proxy_jump': 'alice@jump.example',
+            }],
         )
         config = slurm_utils.get_slurm_ssh_config(user_hash='user1')
         result = config.lookup('mycluster')
         assert result.get('proxyjump') == 'alice@jump.example'
 
-    def test_no_overlay_no_proxyjump(self, slurm_dir):
-        """Without overlay, no proxyjump."""
+    def test_multi_host(self, slurm_dir):
+        """Multiple hosts get separate config blocks."""
+        slurm_utils.persist_slurm_ssh_credentials(
+            user_hash='user1',
+            private_key_content='KEY',
+            hosts=[
+                {
+                    'hostname': 'cluster-a',
+                    'ssh_user': 'alice',
+                    'proxy_jump': 'alice@jump-a',
+                    'container_runtime': 'podman-hpc',
+                },
+                {
+                    'hostname': 'cluster-b',
+                    'ssh_user': 'bob',
+                    'proxy_jump': 'bob@jump-b',
+                },
+            ],
+        )
+        config = slurm_utils.get_slurm_ssh_config(user_hash='user1')
+        hostnames = [h for h in config.get_hostnames() if h != '*']
+        assert set(hostnames) == {'cluster-a', 'cluster-b'}
+
+        a = config.lookup('cluster-a')
+        assert a['user'] == 'alice'
+        assert a.get('proxyjump') == 'alice@jump-a'
+        assert a.get('containerruntime') == 'podman-hpc'
+
+        b = config.lookup('cluster-b')
+        assert b['user'] == 'bob'
+        assert b.get('proxyjump') == 'bob@jump-b'
+
+    def test_no_per_user_no_proxyjump(self, slurm_dir):
+        """Without per-user config, no proxyjump."""
         config = slurm_utils.get_slurm_ssh_config(user_hash='nonexistent')
         result = config.lookup('mycluster')
         assert result.get('proxyjump') is None

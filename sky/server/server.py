@@ -2878,13 +2878,17 @@ async def setup_slurm_ssh(
     if not user_hash:
         raise fastapi.HTTPException(status_code=400,
                                     detail='Missing user_hash in env_vars')
+    # Convert pydantic models to dicts for the persist function.
+    hosts = [h.model_dump() for h in body.hosts] if body.hosts else None
     user_dir = slurm_utils.persist_slurm_ssh_credentials(
         user_hash=user_hash,
         private_key_content=body.private_key_content,
+        hosts=hosts,
+        cert_expires_at=body.cert_expires_at,
+        # Legacy single-host fields (backward compat with old clients).
         ssh_user=body.ssh_user,
         certificate_content=body.certificate_content,
         proxy_jump=body.proxy_jump,
-        cert_expires_at=body.cert_expires_at,
     )
     return {'status': 'ok', 'user_dir': user_dir}
 

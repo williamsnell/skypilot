@@ -259,27 +259,63 @@ def setup_slurm_ssh() -> None:
                 f'{slurm_utils.DEFAULT_SLURM_PATH}.\n'
                 f'Create it first — see the SkyPilot Slurm docs.') from exc
 
-    # 2. Find the first host with a skypilot_* key
-    ssh_user = None
+    # 2. Collect per-host credentials and find the shared private key.
     identity_file = None
-    cert_file = None
-    proxy_jump = None
-    for host in list(slurm_config.get_hostnames()) + ['*']:
+    host_configs: list = []
+    earliest_cert_expiry: Optional[float] = None
+
+    for host in slurm_config.get_hostnames():
+        if host == '*':
+            continue
         try:
             ssh_dict = slurm_config.lookup(host)
         except Exception:  # pylint: disable=broad-except
             continue
+
+        # Find identity file (need at least one with skypilot_* prefix).
         ifile = slurm_utils.get_identity_file(ssh_dict)
-        if ifile is None:
-            continue
-        basename = os.path.basename(os.path.expanduser(ifile))
-        if not basename.startswith('skypilot_'):
-            continue
-        identity_file = ifile
-        cert_file = slurm_utils.get_certificate_file(ssh_dict)
+        if ifile is not None:
+            basename = os.path.basename(os.path.expanduser(ifile))
+            if basename.startswith('skypilot_') and identity_file is None:
+                identity_file = ifile
+
         ssh_user = ssh_dict.get('user')
+        if ssh_user is None:
+            continue  # Skip hosts without a User
+
+        cert_file = slurm_utils.get_certificate_file(ssh_dict)
+        cert_content = None
+        if cert_file:
+            cert_expanded = os.path.expanduser(cert_file)
+            try:
+                with open(cert_expanded, 'r', encoding='utf-8') as f:
+                    cert_content = f.read()
+                # Check expiry for each cert, track the earliest.
+                result = subprocess.run(  # pylint: disable=subprocess-run-check
+                    ['ssh-keygen', '-L', '-f', cert_expanded],
+                    capture_output=True,
+                    text=True,
+                    timeout=5)
+                if result.returncode == 0:
+                    expiry = _parse_cert_expiry(result.stdout)
+                    if expiry is not None:
+                        if (earliest_cert_expiry is None or
+                                expiry < earliest_cert_expiry):
+                            earliest_cert_expiry = expiry
+            except Exception:  # pylint: disable=broad-except
+                pass  # Best-effort
+
         proxy_jump = slurm_utils.resolve_proxy_jump(ssh_dict.get('proxyjump'))
-        break
+        container_runtime = slurm_utils.get_container_runtime(ssh_dict)
+
+        host_configs.append(
+            payloads.SlurmHostCredentials(
+                hostname=host,
+                ssh_user=ssh_user,
+                certificate_content=cert_content,
+                proxy_jump=proxy_jump,
+                container_runtime=container_runtime,
+            ))
 
     if identity_file is None:
         with ux_utils.print_exception_no_traceback():
@@ -290,55 +326,38 @@ def setup_slurm_ssh() -> None:
                 '  ssh-keygen -t ed25519 -f ~/.ssh/skypilot_slurm\n'
                 'Then add IdentityFile ~/.ssh/skypilot_slurm to your '
                 'Slurm SSH config.')
-    if ssh_user is None:
+    if not host_configs:
         with ux_utils.print_exception_no_traceback():
-            raise ValueError('No User configured in '
+            raise ValueError('No Slurm hosts with a User found in '
                              f'{slurm_utils.DEFAULT_SLURM_PATH}.\n'
-                             'Add a User line to your Slurm SSH host block.')
+                             'Add a User line to each Host block.')
 
-    # 3. Read key/cert contents
-    creds = slurm_utils.read_credential_contents(identity_file, cert_file)
-    private_key_content = creds['private_key_content']
-    certificate_content = creds.get('certificate_content')
-    if private_key_content is None:
-        with ux_utils.print_exception_no_traceback():
-            raise ValueError(f'Could not read SSH key from {identity_file}')
+    # 3. Read private key contents.
+    key_expanded = os.path.expanduser(identity_file)
+    slurm_utils.validate_identity_file_for_remote(key_expanded)
+    with open(key_expanded, 'r', encoding='utf-8') as f:
+        private_key_content = f.read()
 
-    # 4. Check certificate expiry (if cert exists)
-    cert_expires_at = None
-    if certificate_content and cert_file:
-        cert_expanded = os.path.expanduser(cert_file)
-        try:
-            result = subprocess.run(  # pylint: disable=subprocess-run-check
-                ['ssh-keygen', '-L', '-f', cert_expanded],
-                capture_output=True,
-                text=True,
-                timeout=5)
-            if result.returncode == 0:
-                cert_expires_at = _parse_cert_expiry(result.stdout)
-                if cert_expires_at is not None:
-                    now = time.time()
-                    if cert_expires_at < now:
-                        click.echo(
-                            f'{colorama.Fore.RED}Warning: SSH certificate '
-                            f'has expired.{colorama.Style.RESET_ALL}',
-                            err=True)
-                    elif cert_expires_at - now < 3600:
-                        click.echo(
-                            f'{colorama.Fore.YELLOW}Warning: SSH certificate '
-                            f'expires within 1 hour.'
-                            f'{colorama.Style.RESET_ALL}',
-                            err=True)
-        except Exception:  # pylint: disable=broad-except
-            pass  # Best-effort expiry check
+    # 4. Warn about certificate expiry.
+    if earliest_cert_expiry is not None:
+        now = time.time()
+        if earliest_cert_expiry < now:
+            click.echo(
+                f'{colorama.Fore.RED}Warning: SSH certificate '
+                f'has expired.{colorama.Style.RESET_ALL}',
+                err=True)
+        elif earliest_cert_expiry - now < 3600:
+            click.echo(
+                f'{colorama.Fore.YELLOW}Warning: SSH certificate '
+                f'expires within 1 hour.'
+                f'{colorama.Style.RESET_ALL}',
+                err=True)
 
     # 5. POST to server
     body = payloads.SetupSlurmSshBody(
         private_key_content=private_key_content,
-        certificate_content=certificate_content,
-        ssh_user=ssh_user,
-        proxy_jump=proxy_jump,
-        cert_expires_at=cert_expires_at,
+        hosts=host_configs,
+        cert_expires_at=earliest_cert_expiry,
     )
     response = server_common.make_authenticated_request(
         'POST', '/setup_slurm_ssh', json=json.loads(body.model_dump_json()))

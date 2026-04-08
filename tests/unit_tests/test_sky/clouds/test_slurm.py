@@ -67,8 +67,8 @@ class TestCheckInstanceFits:
            return_value=None)
     @patch('sky.provision.slurm.utils.get_cluster_default_partition')
     @patch('sky.provision.slurm.utils.slurm.SlurmClient')
-    @patch('sky.provision.slurm.utils.SSHConfig.from_path')
-    def test_check_instance_fits(self, mock_ssh_config, mock_slurm_client,
+    @patch('sky.provision.slurm.utils.get_slurm_ssh_config')
+    def test_check_instance_fits(self, mock_get_ssh_config, mock_slurm_client,
                                  mock_default_partition, mock_kv_cache, nodes,
                                  instance_type, partition, expected_fits,
                                  reason_contains):
@@ -81,7 +81,7 @@ class TestCheckInstanceFits:
             'user': 'slurm',
             'identityfile': ['/home/user/.ssh/id_rsa'],
         }
-        mock_ssh_config.return_value = mock_ssh_config_obj
+        mock_get_ssh_config.return_value = mock_ssh_config_obj
 
         mock_slurm_client_instance = mock.MagicMock()
         mock_slurm_client_instance.info_nodes.return_value = nodes
