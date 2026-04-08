@@ -196,7 +196,8 @@ def main():
                                            log_path,
                                            env_vars=env_vars,
                                            stream_logs=True,
-                                           streaming_prefix=prefix)
+                                           streaming_prefix=prefix,
+                                           source_bashrc=False)
 
     # For multi-node Slurm jobs (one task per node), we need to wait for all
     # tasks to complete before any task exits, because Slurm's proctrack/cgroup

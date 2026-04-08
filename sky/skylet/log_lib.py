@@ -356,7 +356,8 @@ def run_with_log(
 
 
 def make_task_bash_script(codegen: str,
-                          env_vars: Optional[Dict[str, str]] = None) -> str:
+                          env_vars: Optional[Dict[str, str]] = None,
+                          source_bashrc: bool = True) -> str:
     # set -a is used for exporting all variables functions to the environment
     # so that bash `user_script` can access `conda activate`. Detail: #436.
     # Reference: https://www.gnu.org/software/bash/manual/html_node/The-Set-Builtin.html # pylint: disable=line-too-long
@@ -364,14 +365,19 @@ def make_task_bash_script(codegen: str,
     # the ray cluster is started within the runtime env, which may cause the
     # user program to run in that env as well.
     # PYTHONUNBUFFERED is used to disable python output buffering.
+    bashrc_line = 'source ~/.bashrc' if source_bashrc else ''
+    conda_line = ('. $(conda info --base 2> /dev/null)/etc/profile.d/conda.sh '
+                  '> /dev/null 2>&1 || true') if source_bashrc else ''
+    deactivate_line = (constants.DEACTIVATE_SKY_REMOTE_PYTHON_ENV
+                       if source_bashrc else '')
     script = [
         textwrap.dedent(f"""\
             #!/bin/bash
-            source ~/.bashrc
+            {bashrc_line}
             set -a
-            . $(conda info --base 2> /dev/null)/etc/profile.d/conda.sh > /dev/null 2>&1 || true
+            {conda_line}
             set +a
-            {constants.DEACTIVATE_SKY_REMOTE_PYTHON_ENV}
+            {deactivate_line}
             export PYTHONUNBUFFERED=1
             cd {constants.SKY_REMOTE_WORKDIR}"""),
     ]
@@ -407,16 +413,22 @@ def run_bash_command_with_log(bash_command: str,
                               env_vars: Optional[Dict[str, str]] = None,
                               stream_logs: bool = False,
                               with_ray: bool = False,
-                              streaming_prefix: Optional[str] = None):
+                              streaming_prefix: Optional[str] = None,
+                              source_bashrc: bool = True):
     with tempfile.NamedTemporaryFile('w', prefix='sky_app_',
                                      delete=False) as fp:
-        bash_command = make_task_bash_script(bash_command, env_vars=env_vars)
+        bash_command = make_task_bash_script(bash_command,
+                                             env_vars=env_vars,
+                                             source_bashrc=source_bashrc)
         fp.write(bash_command)
         fp.flush()
         script_path = fp.name
 
-        # Need this `-i` option to make sure `source ~/.bashrc` work.
-        inner_command = f'/bin/bash -i {script_path}'
+        if source_bashrc:
+            # Need `-i` to make `source ~/.bashrc` work.
+            inner_command = f'/bin/bash -i {script_path}'
+        else:
+            inner_command = f'/bin/bash {script_path}'
 
         return run_with_log(inner_command,
                             log_path,

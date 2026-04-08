@@ -178,7 +178,7 @@ def _execute_task(task: dict) -> tuple:
 
     try:
         result = subprocess.run(  # pylint: disable=subprocess-run-check
-            ['bash', '-i', script_path],
+            ['bash', script_path],
             capture_output=True,
             text=True,
             env=env,

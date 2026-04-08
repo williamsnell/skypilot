@@ -127,6 +127,9 @@ setup_commands:
         fi
     fi
     SKYPILOT_SSH_RC
+    # Source .sky_ssh_rc from .profile (for Dropbear login shells in
+    # containers) and .bashrc (for interactive shells on the login node).
+    grep -q "source ~/.sky_ssh_rc" ~{{user}}/.profile 2>/dev/null || (echo "" >> ~{{user}}/.profile && echo "source ~/.sky_ssh_rc" >> ~{{user}}/.profile)
     grep -q "source ~/.sky_ssh_rc" ~{{user}}/.bashrc 2>/dev/null || (echo "" >> ~{{user}}/.bashrc && echo "source ~/.sky_ssh_rc" >> ~{{user}}/.bashrc)
     fi
     {{ setup_sky_dirs_commands }}

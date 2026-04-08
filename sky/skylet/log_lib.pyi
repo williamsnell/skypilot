@@ -115,7 +115,8 @@ def run_with_log(cmd: Union[List[str], str],
 
 
 def make_task_bash_script(codegen: str,
-                          env_vars: Optional[Dict[str, str]] = ...) -> str:
+                          env_vars: Optional[Dict[str, str]] = ...,
+                          source_bashrc: bool = ...) -> str:
     ...
 
 
@@ -129,7 +130,8 @@ def run_bash_command_with_log(bash_command: str,
                               env_vars: Optional[Dict[str, str]] = ...,
                               stream_logs: bool = ...,
                               with_ray: bool = ...,
-                              streaming_prefix: Optional[str] = ...) -> int:
+                              streaming_prefix: Optional[str] = ...,
+                              source_bashrc: bool = ...) -> int:
     ...
 
 
