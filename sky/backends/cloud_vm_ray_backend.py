@@ -3952,7 +3952,7 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
             write_task_id = queue.enqueue_task(cluster_name, TaskType.SETUP,
                                                write_cmd)
             queue.wait_for_completion(cluster_name, write_task_id, timeout=60)
-            self._setup_cmd = (f'/bin/bash -i {remote_setup_file}'
+            self._setup_cmd = (f'/bin/bash {remote_setup_file}'
                                f' 2>&1')
             logger.info(ux_utils.finishing_message('Setup detached.'))
             return
