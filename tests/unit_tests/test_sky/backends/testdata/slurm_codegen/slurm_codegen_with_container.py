@@ -715,6 +715,11 @@ if script or False:
 else:
     returncodes = [0]
 
+# Write sentinel so log tailers on the login node know
+# the driver is done (they can't query the in-container
+# skylet DB).
+print('SKYPILOT_JOB_DONE', flush=True)
+
 if sum(returncodes) != 0:
     # Save exit codes to job metadata for potential recovery logic
     if int(constants.SKYLET_VERSION) >= 28:

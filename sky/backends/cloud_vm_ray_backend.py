@@ -4802,13 +4802,22 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 log_glob = f'$({find_latest})/run.log'
             else:
                 log_glob = f'{log_dir}/{job_id}-*/run.log'
-            # Build tail command.
+            # Build tail command. When following, watch for the
+            # job-done sentinel that the driver appends to run.log
+            # on exit. We can't use gRPC TailLogs because the
+            # skylet's gRPC port is only reachable inside the
+            # container, not from the login node.
             tail_parts = ['tail']
             if tail > 0:
                 tail_parts.extend(['-n', str(tail)])
             if follow:
                 tail_parts.append('-f')
             tail_cmd = f'{" ".join(tail_parts)} {log_glob} 2>/dev/null'
+            if follow:
+                # Pipe through sed to stop after the sentinel line.
+                sentinel = constants.SKY_JOB_DONE_SENTINEL
+                sed_script = f'/{sentinel}/q;p'
+                tail_cmd += f' | sed -n {shlex.quote(sed_script)}'
             if threading.current_thread() is threading.main_thread():
                 signal.signal(signal.SIGINT, backend_utils.interrupt_handler)
                 signal.signal(signal.SIGTSTP, backend_utils.stop_handler)

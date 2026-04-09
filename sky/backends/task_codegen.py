@@ -1066,5 +1066,10 @@ class SlurmCodeGen(TaskCodeGen):
                 returncodes = [int(result.get('return_code', 1))]
             else:
                 returncodes = [0]
+
+            # Write sentinel so log tailers on the login node know
+            # the driver is done (they can't query the in-container
+            # skylet DB).
+            print('{constants.SKY_JOB_DONE_SENTINEL}', flush=True)
             """),
         ]

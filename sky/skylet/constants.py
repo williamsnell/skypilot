@@ -25,6 +25,7 @@ SKY_CLUSTER_NAME_ENV_VAR_KEY = 'SKY_CLUSTER_NAME'
 # these are artifacts that users can access, and having
 # them be in $HOME makes it more convenient.
 SKY_LOGS_DIRECTORY = '~/sky_logs'
+SKY_JOB_DONE_SENTINEL = 'SKYPILOT_JOB_DONE'
 SKY_REMOTE_WORKDIR = '~/sky_workdir'
 SKY_TEMPLATES_DIRECTORY = '~/sky_templates'
 SKY_IGNORE_FILE = '.skyignore'
