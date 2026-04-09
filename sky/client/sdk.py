@@ -307,6 +307,7 @@ def setup_slurm_ssh() -> None:
 
         proxy_jump = slurm_utils.resolve_proxy_jump(ssh_dict.get('proxyjump'))
         container_runtime = slurm_utils.get_container_runtime(ssh_dict)
+        resolved_hostname = slurm_utils.resolve_ssh_hostname(host)
 
         host_configs.append(
             payloads.SlurmHostCredentials(
@@ -315,6 +316,7 @@ def setup_slurm_ssh() -> None:
                 certificate_content=cert_content,
                 proxy_jump=proxy_jump,
                 container_runtime=container_runtime,
+                resolved_hostname=resolved_hostname,
             ))
 
     if identity_file is None:

@@ -152,6 +152,7 @@ def persist_slurm_ssh_credentials(
         host_cert_content = host_cfg.get('certificate_content')
         host_proxy = host_cfg.get('proxy_jump')
         host_runtime = host_cfg.get('container_runtime')
+        resolved_hostname = host_cfg.get('resolved_hostname')
 
         # Write per-host certificate if provided.
         cert_path = None
@@ -163,6 +164,8 @@ def persist_slurm_ssh_credentials(
             os.chmod(cert_path, 0o644)
 
         config_lines.append(f'Host {hostname}')
+        if resolved_hostname:
+            config_lines.append(f'    HostName {resolved_hostname}')
         config_lines.append(f'    User {host_user}')
         config_lines.append(f'    IdentityFile {key_path}')
         config_lines.append('    IdentitiesOnly yes')
@@ -348,6 +351,33 @@ def resolve_proxy_jump(proxy_jump: Optional[str]) -> Optional[str]:
     except Exception:  # pylint: disable=broad-except
         logger.debug('Failed to resolve ProxyJump host %s', host)
     return f'{user_prefix}{host}{port_suffix}'
+
+
+def resolve_ssh_hostname(host: str) -> Optional[str]:
+    """Resolve an SSH host alias to its actual hostname.
+
+    Uses `ssh -G` to look up the HostName through the system SSH config.
+    Returns the resolved hostname, or None if it matches the input
+    (no resolution needed).
+    """
+    try:
+        import subprocess  # pylint: disable=import-outside-toplevel
+        result = subprocess.run(  # pylint: disable=subprocess-run-check
+            ['ssh', '-G', host],
+            capture_output=True,
+            text=True,
+            timeout=5)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if line.startswith('hostname '):
+                    resolved = line.split(' ', 1)[1]
+                    if resolved != host:
+                        logger.debug('Resolved SSH host %s -> %s', host,
+                                     resolved)
+                        return resolved
+    except Exception:  # pylint: disable=broad-except
+        logger.debug('Failed to resolve SSH host %s', host)
+    return None
 
 
 def get_identities_only(ssh_config_dict: Dict[str, Any]) -> bool:

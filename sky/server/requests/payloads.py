@@ -161,6 +161,9 @@ class SlurmHostCredentials(pydantic.BaseModel):
     certificate_content: Optional[str] = None
     proxy_jump: Optional[str] = None
     container_runtime: Optional[str] = None
+    # The actual hostname to connect to (resolved from system SSH config).
+    # If None, the hostname field is used as-is.
+    resolved_hostname: Optional[str] = None
 
 
 class SetupSlurmSshBody(BasePayload):
