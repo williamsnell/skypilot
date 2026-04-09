@@ -2075,6 +2075,10 @@ exec {ssh_command} srun --unbuffered --quiet --overlap \\
         cmd: Union[str, List[str]],
         **kwargs,
     ) -> Union[int, Tuple[int, str, str]]:
+        # Slurm sets up its own environment in _run_via_srun (venv,
+        # HOME, etc.), so never source .bashrc on the login node — it
+        # may not exist and is not needed.
+        kwargs['source_bashrc'] = False
         if (self.container_args and
                 self.container_args.startswith('podman-hpc')):
             # podman-hpc: only run inside the container. The host may
