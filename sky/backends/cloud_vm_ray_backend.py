@@ -4831,6 +4831,14 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 )
             except SystemExit as e:
                 final = e.code
+            except exceptions.CommandError as e:
+                if e.returncode == 255:
+                    raise exceptions.SSHError(
+                        f'SSH connection failed during log tailing: {e}') from e
+                raise
+            except Exception as e:
+                raise exceptions.SSHError(
+                    f'SSH connection failed during log tailing: {e}') from e
             return final
 
         if handle.is_grpc_enabled_with_flag:
@@ -5817,17 +5825,12 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
             exceptions.FetchClusterInfoError: If the cluster info cannot be
                 fetched.
         """
-        # This will try to fetch the head node IP if it is not cached.
-
-        runners = handle.get_command_runners()
-        head_runner = runners[0]
-        if under_remote_workdir:
-            cmd = f'cd {SKY_REMOTE_WORKDIR} && {cmd}'
-
         # For Slurm+podman-hpc, deliver commands via the poll-based task
-        # queue. The poll worker running inside the container picks up the
-        # command and executes it.
+        # queue. This avoids SSH to the login node (which can be flaky)
+        # and doesn't need get_command_runners() at all.
         if handle.is_slurm_podman_hpc():
+            if under_remote_workdir:
+                cmd = f'cd {SKY_REMOTE_WORKDIR} && {cmd}'
             queue = get_task_queue()
             cluster_name = handle.cluster_name_on_cloud
             task_id = queue.enqueue_task(cluster_name, TaskType.RUN, cmd)
@@ -5841,6 +5844,12 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
             if require_outputs:
                 return exit_code, stdout, stderr
             return exit_code
+
+        # This will try to fetch the head node IP if it is not cached.
+        runners = handle.get_command_runners()
+        head_runner = runners[0]
+        if under_remote_workdir:
+            cmd = f'cd {SKY_REMOTE_WORKDIR} && {cmd}'
 
         return head_runner.run_driver(
             cmd,

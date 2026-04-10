@@ -645,6 +645,13 @@ class JobController:
                         f'Exception: {common_utils.format_exception(fetch_e)}\n'
                         f'Traceback: {traceback.format_exc()}')
                     # Fall through to recovery logic below
+                except exceptions.SSHError as ssh_e:
+                    # Transient SSH failure (e.g. connection reset).
+                    # Treat as a transient error and retry, don't trigger
+                    # recovery — the job is likely still healthy.
+                    logger.info('Transient SSH error when fetching job status: '
+                                f'{common_utils.format_exception(ssh_e)}')
+                    transient_job_check_error_reason = str(ssh_e)
 
             # When job status check fails, we need to retry to avoid false alarm
             # for job failure, as it could be a transient error for

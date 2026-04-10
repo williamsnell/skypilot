@@ -135,6 +135,16 @@ class SSHCertificateExpiredError(Exception):
     """
 
 
+class SSHError(Exception):
+    """Transient SSH connection failure.
+
+    Raised when an SSH command fails due to a connection-level error
+    (e.g. returncode 255, connection reset, kex_exchange_identification
+    failures). These are typically transient and should be retried rather
+    than treated as fatal.
+    """
+
+
 class CloudError(Exception):
     """Wraps cloud-specific errors into a SkyPilot exception."""
 

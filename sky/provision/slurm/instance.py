@@ -1366,6 +1366,9 @@ def terminate_instances(
         logger.debug('Failed to cleanup poll worker state for %s',
                      cluster_name_on_cloud)
 
+    # Invalidate cached SSH-derived values for this cluster.
+    invalidate_command_runner_cache(cluster_name_on_cloud)
+
 
 def open_ports(
     cluster_name_on_cloud: str,
@@ -1413,6 +1416,23 @@ def _build_podman_hpc_args(cluster_name_on_cloud: str,
             f'--env TMPDIR=/tmp '
             f'--env SKYPILOT_NFS_HOME={remote_home_dir} '
             f'{shlex.quote(container_name)}')
+
+
+# Cache for SSH-derived values in get_command_runners(). These values
+# (remote_home_dir, workdir, tmpdir, has_container) are static for the
+# lifetime of a cluster, so we cache them to avoid SSH round-trips on
+# every call.
+_command_runner_cache: Dict[str, Dict[str, Any]] = {}
+_command_runner_cache_lock = threading.Lock()
+
+
+def invalidate_command_runner_cache(cluster_name_on_cloud: str) -> None:
+    """Invalidate the cached SSH-derived values for a cluster.
+
+    Call this when a cluster is torn down or reprovisioned.
+    """
+    with _command_runner_cache_lock:
+        _command_runner_cache.pop(cluster_name_on_cloud, None)
 
 
 def get_command_runners(
@@ -1465,44 +1485,69 @@ def get_command_runners(
     # collisions between different Slurm clusters.
     ssh_control_name = command_runner.DEFAULT_SSH_CONTROL_NAME
 
-    client = slurm.SlurmClient(
-        login_node_ssh_hostname,
-        login_node_ssh_port,
-        login_node_ssh_user,
-        login_node_ssh_private_key,
-        ssh_proxy_command=login_node_ssh_proxy_command,
-        ssh_proxy_jump=login_node_ssh_proxy_jump,
-        identities_only=login_node_identities_only,
-        ssh_certificate_file=login_node_ssh_certificate_file,
-    )
-    remote_home_dir = client.get_remote_home_dir()
+    # Use cached SSH-derived values if available. These values (home dir,
+    # env vars, container marker) are static for the lifetime of a cluster.
+    with _command_runner_cache_lock:
+        cached = _command_runner_cache.get(cluster_name_on_cloud)
 
-    slurm_cluster_name = provider_config.get('cluster')
-    workdir = skypilot_config.get_effective_region_config(
-        cloud='slurm',
-        region=slurm_cluster_name,
-        keys=('workdir',),
-        default_value=None)
-    tmpdir = skypilot_config.get_effective_region_config(
-        cloud='slurm',
-        region=slurm_cluster_name,
-        keys=('tmpdir',),
-        default_value=None)
-    if workdir is not None or tmpdir is not None:
-        remote_env = client.get_env()
-        if workdir is not None:
-            workdir = slurm_utils.expand_path_vars(workdir, remote_env)
-        if tmpdir is not None:
-            tmpdir = slurm_utils.expand_path_vars(tmpdir, remote_env)
+    if cached is not None:
+        remote_home_dir = cached['remote_home_dir']
+        workdir = cached['workdir']
+        tmpdir = cached['tmpdir']
+        has_container = cached['has_container']
+    else:
+        client = slurm.SlurmClient(
+            login_node_ssh_hostname,
+            login_node_ssh_port,
+            login_node_ssh_user,
+            login_node_ssh_private_key,
+            ssh_proxy_command=login_node_ssh_proxy_command,
+            ssh_proxy_jump=login_node_ssh_proxy_jump,
+            identities_only=login_node_identities_only,
+            ssh_certificate_file=login_node_ssh_certificate_file,
+        )
+        remote_home_dir = client.get_remote_home_dir()
+
+        slurm_cluster_name = provider_config.get('cluster')
+        workdir = skypilot_config.get_effective_region_config(
+            cloud='slurm',
+            region=slurm_cluster_name,
+            keys=('workdir',),
+            default_value=None)
+        tmpdir = skypilot_config.get_effective_region_config(
+            cloud='slurm',
+            region=slurm_cluster_name,
+            keys=('tmpdir',),
+            default_value=None)
+        if workdir is not None or tmpdir is not None:
+            remote_env = client.get_env()
+            if workdir is not None:
+                workdir = slurm_utils.expand_path_vars(workdir, remote_env)
+            if tmpdir is not None:
+                tmpdir = slurm_utils.expand_path_vars(tmpdir, remote_env)
+
+        sky_base_dir = workdir if workdir is not None else remote_home_dir
+        assert os.path.isabs(sky_base_dir), (
+            f'sky_base_dir must be absolute, got: {sky_base_dir}')
+        sky_cluster_home_dir = _sky_cluster_home_dir(sky_base_dir,
+                                                     cluster_name_on_cloud)
+        container_marker = (f'{sky_cluster_home_dir}/'
+                            f'{slurm_utils.SLURM_CONTAINER_MARKER_FILE}')
+        has_container = client.check_file_exists(container_marker)
+
+        with _command_runner_cache_lock:
+            _command_runner_cache[cluster_name_on_cloud] = {
+                'remote_home_dir': remote_home_dir,
+                'workdir': workdir,
+                'tmpdir': tmpdir,
+                'has_container': has_container,
+            }
 
     sky_base_dir = workdir if workdir is not None else remote_home_dir
     assert os.path.isabs(sky_base_dir), (
         f'sky_base_dir must be absolute, got: {sky_base_dir}')
     sky_cluster_home_dir = _sky_cluster_home_dir(sky_base_dir,
                                                  cluster_name_on_cloud)
-    container_marker = (
-        f'{sky_cluster_home_dir}/{slurm_utils.SLURM_CONTAINER_MARKER_FILE}')
-    has_container = client.check_file_exists(container_marker)
     container_runtime = provider_config.get('container_runtime', None)
     container_args = None
     if has_container:

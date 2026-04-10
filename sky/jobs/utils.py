@@ -433,12 +433,15 @@ async def get_job_status(
             logger.info(f'Job status: {status}')
         logger.info('=' * 34)
         return status, None
-    except (exceptions.CommandError, grpc.RpcError, grpc.FutureTimeoutError,
-            ValueError, TypeError, asyncio.TimeoutError) as e:
+    except (exceptions.CommandError, exceptions.SSHError, grpc.RpcError,
+            grpc.FutureTimeoutError, ValueError, TypeError,
+            asyncio.TimeoutError) as e:
         # Note: Each of these exceptions has some additional conditions to
         # limit how we handle it and whether or not we catch it.
         potential_transient_error_reason = None
-        if isinstance(e, exceptions.CommandError):
+        if isinstance(e, exceptions.SSHError):
+            potential_transient_error_reason = f'SSH error: {e}'
+        elif isinstance(e, exceptions.CommandError):
             returncode = e.returncode
             potential_transient_error_reason = (f'Returncode: {returncode}. '
                                                 f'{e.detailed_reason}')
@@ -1303,11 +1306,25 @@ def stream_logs_by_id(
             assert isinstance(handle, backends.CloudVmRayResourceHandle), handle
             status_display.stop()
             tail_param = tail if tail is not None else 0
-            returncode = backend.tail_logs(handle,
-                                           job_id=job_id_to_tail,
-                                           managed_job_id=job_id,
-                                           follow=follow,
-                                           tail=tail_param)
+            try:
+                returncode = backend.tail_logs(handle,
+                                               job_id=job_id_to_tail,
+                                               managed_job_id=job_id,
+                                               follow=follow,
+                                               tail=tail_param)
+            except exceptions.SSHError:
+                logger.warning('SSH connection lost during log tailing. '
+                               'Retrying...')
+                time.sleep(JOB_STATUS_CHECK_GAP_SECONDS)
+                latest_task_id, managed_job_status = (
+                    managed_job_state.get_latest_task_id_status(job_id))
+                if filtered_task_id is not None:
+                    latest_task_id = filtered_task_id
+                assert managed_job_status is not None, (job_id, latest_task_id,
+                                                        managed_job_status)
+                assert latest_task_id is not None, (job_id, latest_task_id)
+                task_id = latest_task_id
+                continue
             if returncode in [rc.value for rc in exceptions.JobExitCode]:
                 # If the log tailing exits with a known exit code we can safely
                 # break the loop because it indicates the tailing process
