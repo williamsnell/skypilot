@@ -812,8 +812,6 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'podman-hpc run --gpu '
                 f'--env SLURM_PROCID=$SLURM_PROCID '
                 f'--env SKYPILOT_NFS_HOME={remote_home_dir} '
-                f'--env SKYPILOT_HOST_ENV='
-                f'{shlex.quote(json.dumps(remote_env))} '
                 f'--name {shlex.quote(podman_container_name)} '
                 f'--replace '
                 f'{podman_mount_args} '
@@ -853,6 +851,16 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'>> {skypilot_runtime_dir}/.profile\n'
                 f'echo "export SKYPILOT_NFS_HOME='
                 f'{remote_home_dir}" '
+                f'>> {skypilot_runtime_dir}/.profile\n'
+                # Write the host environment as JSON to a file, then
+                # have .profile export it. This makes host vars like
+                # $PROJECTDIR available inside the container via:
+                #   import json, os
+                #   host = json.loads(os.environ['SKYPILOT_HOST_ENV'])
+                f'echo {shlex.quote(json.dumps(remote_env))} '
+                f'> {skypilot_runtime_dir}/.host_env.json\n'
+                f'echo \'export SKYPILOT_HOST_ENV='
+                f'$(cat /root/.host_env.json)\' '
                 f'>> {skypilot_runtime_dir}/.profile\n'
                 f'touch {ready_signal}')
         else:
