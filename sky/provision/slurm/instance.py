@@ -1,5 +1,6 @@
 """Slurm instance provisioning."""
 
+import json
 import os
 import random
 import shlex
@@ -590,16 +591,15 @@ def _create_virtual_instance(
     )
     remote_home_dir = login_node_runner.get_remote_home_dir()
 
-    # Resolve shell variables (e.g. $USER, $PROJECTDIR) in workdir/tmpdir
-    # and container_mounts using the remote host's environment.
-    need_remote_env = (workdir is not None or tmpdir is not None or
-                       container_mounts_config is not None)
-    if need_remote_env:
-        remote_env = client.get_env()
-        if workdir is not None:
-            workdir = slurm_utils.expand_path_vars(workdir, remote_env)
-        if tmpdir is not None:
-            tmpdir = slurm_utils.expand_path_vars(tmpdir, remote_env)
+    # Fetch the remote host's environment. Needed to:
+    # 1. Resolve shell variables in workdir/tmpdir/container_mounts
+    # 2. Pass host env vars into the container as SKYPILOT_HOST_ENV
+    remote_env = client.get_env()
+    if workdir is not None:
+        workdir = slurm_utils.expand_path_vars(workdir, remote_env)
+    if tmpdir is not None:
+        tmpdir = slurm_utils.expand_path_vars(tmpdir, remote_env)
+    if workdir is not None or tmpdir is not None:
         logger.debug(f'Resolved workdir: {workdir}, tmpdir: {tmpdir}')
     resolved_container_mounts: List[str] = []
     if container_mounts_config is not None:
@@ -812,6 +812,8 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'podman-hpc run --gpu '
                 f'--env SLURM_PROCID=$SLURM_PROCID '
                 f'--env SKYPILOT_NFS_HOME={remote_home_dir} '
+                f'--env SKYPILOT_HOST_ENV='
+                f'{shlex.quote(json.dumps(remote_env))} '
                 f'--name {shlex.quote(podman_container_name)} '
                 f'--replace '
                 f'{podman_mount_args} '
@@ -838,11 +840,6 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'$((SECONDS - CONTAINER_START))s"\n'
                 f'echo {shlex.quote(container_image)} > '
                 f'{container_marker_file}\n'
-                # Dump the host environment to a file so the user can
-                # source it inside the container to access host variables
-                # like $PROJECTDIR, $SCRATCH, etc. without SkyPilot needing
-                # to explicitly forward each one.
-                f'env > {sky_cluster_home_dir}/.host_env\n'
                 # Append SKY_RUNTIME_DIR and UV_CACHE_DIR to .profile.
                 # Container init already wrote PATH/LD_LIBRARY_PATH inside
                 # the container. We write from the host side because
@@ -856,9 +853,6 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'>> {skypilot_runtime_dir}/.profile\n'
                 f'echo "export SKYPILOT_NFS_HOME='
                 f'{remote_home_dir}" '
-                f'>> {skypilot_runtime_dir}/.profile\n'
-                f'echo "export SKYPILOT_HOST_ENV='
-                f'{sky_cluster_home_dir}/.host_env" '
                 f'>> {skypilot_runtime_dir}/.profile\n'
                 f'touch {ready_signal}')
         else:
