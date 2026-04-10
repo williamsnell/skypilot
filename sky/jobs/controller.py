@@ -746,10 +746,20 @@ class JobController:
             # depending on the cloud, which can also cause failure of the job.
             # Plugins can report such failures via ExternalFailureSource.
             # TODO(cooperc): do we need to add this to asyncio thread?
-            (cluster_status, handle) = await asyncio.to_thread(
-                backend_utils.refresh_cluster_status_handle,
-                cluster_name,
-                force_refresh_statuses=set(status_lib.ClusterStatus))
+            try:
+                (cluster_status, handle) = await asyncio.to_thread(
+                    backend_utils.refresh_cluster_status_handle,
+                    cluster_name,
+                    force_refresh_statuses=set(status_lib.ClusterStatus))
+            except exceptions.ClusterStatusFetchingError as e:
+                # For Slurm, this can happen when the job terminates and
+                # nodes are deallocated — get_job_nodes() finds nothing.
+                # Treat as cluster-down and enter recovery/cleanup.
+                logger.info(f'Failed to fetch cluster status: '
+                            f'{common_utils.format_exception(e)}. '
+                            'Treating as cluster down.')
+                cluster_status = None
+                handle = None
 
             external_failures: Optional[List[ExternalClusterFailure]] = None
             cluster_event_reason = None

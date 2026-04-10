@@ -1163,7 +1163,14 @@ def query_instances(
                 continue
             statuses[info.job_id] = (sky_status, info.reason)
         else:
-            nodes, _ = client.get_job_nodes(info.job_id)
+            try:
+                nodes, _ = client.get_job_nodes(info.job_id)
+            except RuntimeError:
+                # Race: job terminated between poll() and get_job_nodes().
+                # Treat as terminated — the next poll will see the final state.
+                logger.debug(
+                    f'Job {info.job_id} has no nodes (likely just terminated)')
+                continue
             for node in nodes:
                 instance_id = slurm_utils.instance_id(info.job_id, node)
                 statuses[instance_id] = (sky_status, None)
