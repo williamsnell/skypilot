@@ -522,6 +522,11 @@ def _create_virtual_instance(
                                                          region=region,
                                                          keys=('tmpdir',),
                                                          default_value=None)
+    container_mounts_config: Optional[list] = (
+        skypilot_config.get_effective_region_config(cloud='slurm',
+                                                    region=region,
+                                                    keys=('container_mounts',),
+                                                    default_value=None))
     if existing_jobs:
         assert len(existing_jobs) == 1, (
             f'Multiple jobs found with name {cluster_name_on_cloud}: '
@@ -585,15 +590,27 @@ def _create_virtual_instance(
     )
     remote_home_dir = login_node_runner.get_remote_home_dir()
 
-    # Resolve shell variables (e.g. $USER) in workdir/tmpdir using the
-    # remote host's environment.
-    if workdir is not None or tmpdir is not None:
+    # Resolve shell variables (e.g. $USER, $PROJECTDIR) in workdir/tmpdir
+    # and container_mounts using the remote host's environment.
+    need_remote_env = (workdir is not None or tmpdir is not None or
+                       container_mounts_config is not None)
+    if need_remote_env:
         remote_env = client.get_env()
         if workdir is not None:
             workdir = slurm_utils.expand_path_vars(workdir, remote_env)
         if tmpdir is not None:
             tmpdir = slurm_utils.expand_path_vars(tmpdir, remote_env)
         logger.debug(f'Resolved workdir: {workdir}, tmpdir: {tmpdir}')
+    resolved_container_mounts: List[str] = []
+    if container_mounts_config is not None:
+        for mount in container_mounts_config:
+            parts = mount.split(':')
+            resolved_parts = [
+                slurm_utils.expand_path_vars(p, remote_env) for p in parts
+            ]
+            resolved_container_mounts.append(':'.join(resolved_parts))
+        logger.debug(f'Resolved container_mounts: '
+                     f'{resolved_container_mounts}')
 
     # Must be absolute — #SBATCH directives don't expand ~ or $HOME.
     sky_base_dir = workdir if workdir is not None else remote_home_dir
@@ -704,6 +721,8 @@ def _create_virtual_instance(
         # it so the container can access sky_cluster_home_dir.
         if workdir is not None and workdir != remote_home_dir:
             mount_paths.append(f'{workdir}:{workdir}')
+        # User-configured container mounts from ~/.sky/config.yaml.
+        mount_paths.extend(resolved_container_mounts)
         # Add sudo alias to bashrc since we're already root in the container.
         # This allows scripts with 'sudo' commands to work without modification.
         # For containers, ~ is /root which is isolated inside the container,
@@ -819,6 +838,11 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'$((SECONDS - CONTAINER_START))s"\n'
                 f'echo {shlex.quote(container_image)} > '
                 f'{container_marker_file}\n'
+                # Dump the host environment to a file so the user can
+                # source it inside the container to access host variables
+                # like $PROJECTDIR, $SCRATCH, etc. without SkyPilot needing
+                # to explicitly forward each one.
+                f'env > {sky_cluster_home_dir}/.host_env\n'
                 # Append SKY_RUNTIME_DIR and UV_CACHE_DIR to .profile.
                 # Container init already wrote PATH/LD_LIBRARY_PATH inside
                 # the container. We write from the host side because
@@ -832,6 +856,9 @@ echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
                 f'>> {skypilot_runtime_dir}/.profile\n'
                 f'echo "export SKYPILOT_NFS_HOME='
                 f'{remote_home_dir}" '
+                f'>> {skypilot_runtime_dir}/.profile\n'
+                f'echo "export SKYPILOT_HOST_ENV='
+                f'{sky_cluster_home_dir}/.host_env" '
                 f'>> {skypilot_runtime_dir}/.profile\n'
                 f'touch {ready_signal}')
         else:

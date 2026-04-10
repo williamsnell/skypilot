@@ -1660,6 +1660,12 @@ def get_config_schema():
                                 'type': 'number',
                                 'minimum': 2,
                             },
+                            'container_mounts': {
+                                'type': 'array',
+                                'items': {
+                                    'type': 'string',
+                                },
+                            },
                             'pricing': _PRICING_SCHEMA,
                             'sbatch_options': _SBATCH_OPTIONS_SCHEMA,
                             'partition_configs': {
