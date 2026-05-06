@@ -268,12 +268,17 @@ def _create_template_for_docker_login(
         password=login_config.password,
     )
     registry_auth_id = create_auth_resp['id']
+    formatted_image = login_config.format_image(image_name)
+    # RunPod's saveTemplate validator rejects imageName="None" — the literal
+    # the runpod SDK serializes when image_name=None is passed. The template's
+    # imageName is metadata only (the actual pod launch uses its own image
+    # arg), so pass the formatted image to satisfy the validator.
     create_template_resp = runpod.runpod.create_template(
         name=container_template_name,
-        image_name=None,
+        image_name=formatted_image,
         registry_auth_id=registry_auth_id,
     )
-    return login_config.format_image(image_name), create_template_resp['id']
+    return formatted_image, create_template_resp['id']
 
 
 def launch(
