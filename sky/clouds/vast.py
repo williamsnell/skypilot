@@ -231,6 +231,13 @@ class Vast(clouds.Cloud):
             'image_id': image_id,
             'secure_only': secure_only,
             'create_instance_kwargs': create_instance_kwargs or {},
+            # Vast is docker-native (the instance IS the container), so a
+            # private-registry login rides in the provider config, not a
+            # top-level `docker:` field -- mirroring yotta.py. Without this the
+            # name is unbound in vast-ray.yml.j2 and its
+            # `{% if docker_login_config is not none %}` guard crashes.
+            # provision/vast/instance.py reads it back from provider_config.
+            'docker_login_config': resources.docker_login_config,
         }
 
     def _get_feasible_launchable_resources(
